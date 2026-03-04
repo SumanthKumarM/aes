@@ -78,14 +78,14 @@ where T is the **forward basis matrix**:
 
 $$
 T = \begin{bmatrix}
-1 & 0 & 0 & 0 & 1 & 1 & 1 & 1 \\
-1 & 1 & 0 & 0 & 0 & 1 & 1 & 1 \\
-1 & 1 & 1 & 0 & 0 & 0 & 1 & 1 \\
-1 & 1 & 1 & 1 & 0 & 0 & 0 & 1 \\
-1 & 1 & 1 & 1 & 1 & 0 & 0 & 0 \\
-0 & 1 & 1 & 1 & 1 & 1 & 0 & 0 \\
-0 & 0 & 1 & 1 & 1 & 1 & 1 & 0 \\
-0 & 0 & 0 & 1 & 1 & 1 & 1 & 1
+1 & 0 & 0 & 0 & 0 & 1 & 0 & 1 \\
+0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 1 & 1 & 1 & 1 & 1 & 1 \\
+0 & 0 & 0 & 1 & 1 & 0 & 0 & 0 \\
+0 & 0 & 0 & 0 & 1 & 1 & 1 & 0 \\
+0 & 1 & 0 & 0 & 1 & 0 & 1 & 1 \\
+0 & 0 & 1 & 1 & 0 & 1 & 0 & 1 \\
+0 & 0 & 0 & 0 & 0 & 1 & 0 & 1
 \end{bmatrix}
 $$  
 
@@ -106,14 +106,14 @@ The inverse transformation matrix is gives as:
 
 $$
 T^{-1} = \begin{bmatrix}
-0 & 0 & 1 & 0 & 0 & 1 & 0 & 1 \\
-1 & 0 & 0 & 1 & 0 & 0 & 1 & 0 \\
-0 & 1 & 0 & 0 & 1 & 0 & 0 & 1 \\
-1 & 0 & 1 & 0 & 0 & 1 & 0 & 0 \\
-0 & 1 & 0 & 1 & 0 & 0 & 1 & 0 \\
-0 & 0 & 1 & 0 & 1 & 0 & 0 & 1 \\
-1 & 0 & 0 & 1 & 0 & 1 & 0 & 0 \\
-0 & 1 & 0 & 0 & 1 & 0 & 1 & 0
+1 & 0 & 0 & 0 & 0 & 0 & 0 & 1 \\
+0 & 0 & 0 & 0 & 1 & 1 & 0 & 1 \\
+0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 & 1 & 1 \\
+0 & 1 & 0 & 1 & 0 & 0 & 1 & 1 \\
+0 & 0 & 1 & 0 & 1 & 0 & 1 & 0 \\
+0 & 1 & 1 & 1 & 0 & 0 & 0 & 1 \\
+0 & 0 & 1 & 0 & 1 & 0 & 1 & 1
 \end{bmatrix}
 $$
 
@@ -128,11 +128,15 @@ After applying the forward basis transform:
 
 A(x) = a₁x + a₀
 
-The multiplicative inverse is computed as:
+The multiplicative inverse A(x) in GF((2⁴)²) is:
 
-A⁻¹ = D⁻¹ · (a₁x + a₀)
+A⁻¹ = D⁻¹ · Ā
 
-Where:
+Where:  
+
+Ā is the conjugate of A. The conjugate is obtained by evaluating A at the other root (α+1 instead of α):
+
+Ā = a₁(x + 1) + a₀ = a₁x + (a₁ ⊕ a₀)
 
 D = a₁²λ ⊕ a₀a₁ ⊕ a₀²
 
@@ -202,7 +206,7 @@ The randomness cancels during recombination.
 After computing D⁻¹:
 
 new_a₁ = D⁻¹ · a₁  
-new_a₀ = D⁻¹ · a₀  
+new_a₀ = D⁻¹ · (a₁ ⊕ a₀)  
 
 This produces the inverse tower element:
 
@@ -214,7 +218,7 @@ A⁻¹ = new_a₁ x + new_a₀
 
 The inverted tower element is mapped back to the AES polynomial basis:
 
-b⁻¹ = T⁻¹ · [new_a₁ new_a₀]
+b⁻¹ = T⁻¹ · {new_a₁, new_a₀}
 
 This yields the multiplicative inverse in **GF(2⁸)**.
 
