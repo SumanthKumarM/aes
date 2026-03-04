@@ -1,67 +1,148 @@
-# Composite Masked AES S-Box Implementation
+# Composite Masked AES S-Box
 ## Based on Canright Composite Field Inversion
 
-This project implements a first-order masked AES S-Box using Canright's composite field inversion method.
+This project implements a **first-order masked AES S-Box** using  
+**Canright’s composite field inversion method**.
 
-AES SubBytes transformation is defined as:
+The AES SubBytes transformation is defined as:
 
 b′ = A · b⁻¹ ⊕ c
 
 Where:
-- b⁻¹ is multiplicative inverse in GF(2⁸)
-- A is affine transformation matrix
-- c is affine constant vector
 
-The most complex part of this computation is finding b⁻¹ securely.  
-This implementation uses composite field arithmetic:
+- `b` is a byte in GF(2⁸)
+- `b⁻¹` is the multiplicative inverse in GF(2⁸)
+- `A` is the affine transformation matrix
+- `c` is the affine constant vector
+
+The most computationally expensive step is computing `b⁻¹`.  
+This design computes the inverse using composite field arithmetic:
 
 GF(2⁸) ≅ GF((2⁴)²)
 
 ---
 
-## Mathematical Foundations
+# Field Definitions
 
-### Field Definitions
+AES operates in GF(2⁸) defined by the polynomial: x⁸ + x⁴ + x³ + x + 1
 
-- AES field polynomial:
-  x⁸ + x⁴ + x³ + x + 1
+For composite inversion we decompose the field as GF((2⁴)²)  
 
-- GF(2⁴) polynomial:
-  y⁴ + y + 1
+Inner field GF(2⁴) defined by (y⁴ + y + 1)
 
-- Tower field polynomial:
-  x² + x + λ
-  where λ = 0x8 (as per Canright)
+Extension polynomial: (x² + x + λ)
+
+For Canright’s basis choice:
+
+λ = 0x8
+
+This value arises from the **basis transformation between GF(2⁸) and the tower field representation**.
 
 ---
 
-## Implementation Steps
+# Basis Transformation
 
-### 1. Forward Basis Transformation
+To perform composite inversion, the AES byte must first be converted into the **tower field representation**.
 
-Input byte $b \in GF(2^8)$ is mapped into tower representation:
+This is achieved using a fixed **8×8 linear transformation matrix**.
+
+The transformation is performed over **GF(2)**, meaning:
+
+- addition = XOR
+- multiplication = AND
+
+---
+
+# Forward Basis Matrix (T)
+
+This matrix converts the AES byte into the tower representation:  
+
+Transforms AES byte → tower field representation  
+
+AES byte → GF((2⁴)²)
+
+After transformation:
 
 A(x) = a₁x + a₀
 
-Using fixed 8×8 matrix T:
+where:
 
-AES basis → Tower basis
+- a₁ ∈ GF(2⁴)
+- a₀ ∈ GF(2⁴)  
 
-This is a linear transformation implemented using XOR networks.
+a₁ and a₀ are obtained using forward basis matrix:  
+
+T · b = {a₁, a₀}
+
+where T is the **forward basis matrix**:  
+
+$$
+T = \begin{bmatrix}
+1 & 0 & 0 & 0 & 1 & 1 & 1 & 1 \\
+1 & 1 & 0 & 0 & 0 & 1 & 1 & 1 \\
+1 & 1 & 1 & 0 & 0 & 0 & 1 & 1 \\
+1 & 1 & 1 & 1 & 0 & 0 & 0 & 1 \\
+1 & 1 & 1 & 1 & 1 & 0 & 0 & 0 \\
+0 & 1 & 1 & 1 & 1 & 1 & 0 & 0 \\
+0 & 0 & 1 & 1 & 1 & 1 & 1 & 0 \\
+0 & 0 & 0 & 1 & 1 & 1 & 1 & 1
+\end{bmatrix}
+$$  
+
+
+This operation is implemented purely using **XOR networks** in hardware.
+
+---  
+
+# Inverse Basis Matrix (T⁻¹)
+
+After composite inversion is completed, the tower field representation must be converted back to the AES polynomial basis.
+
+This is done using the inverse transformation matrix:
+
+GF((2⁴)²) → AES byte
+
+The inverse transformation matrix is gives as:  
+
+$$
+T^{-1} = \begin{bmatrix}
+0 & 0 & 1 & 0 & 0 & 1 & 0 & 1 \\
+1 & 0 & 0 & 1 & 0 & 0 & 1 & 0 \\
+0 & 1 & 0 & 0 & 1 & 0 & 0 & 1 \\
+1 & 0 & 1 & 0 & 0 & 1 & 0 & 0 \\
+0 & 1 & 0 & 1 & 0 & 0 & 1 & 0 \\
+0 & 0 & 1 & 0 & 1 & 0 & 0 & 1 \\
+1 & 0 & 0 & 1 & 0 & 1 & 0 & 0 \\
+0 & 1 & 0 & 0 & 1 & 0 & 1 & 0
+\end{bmatrix}
+$$
+
+
+This transformation is also linear and implemented entirely using **XOR logic**.
 
 ---
 
-### 2. Compute Tower Field Denominator
+# Composite Field Inversion
+
+After applying the forward basis transform:
+
+A(x) = a₁x + a₀
+
+The multiplicative inverse is computed as:
+
+A⁻¹ = D⁻¹ · (a₁x + a₀)
+
+Where:
 
 D = a₁²λ ⊕ a₀a₁ ⊕ a₀²
 
-All operations performed in GF(2⁴).
+All arithmetic is performed in **GF(2⁴)**.
 
 ---
 
-### 3. Compute D⁻¹ Using Exponentiation
+# Computing D⁻¹
 
-Since GF(2⁴) has 16 elements:
+Since GF(2⁴) contains 16 elements:
 
 D⁻¹ = D¹⁴
 
@@ -69,107 +150,112 @@ Exponentiation is implemented as:
 
 D¹⁴ = D⁸ · D⁴ · D²
 
-Where:
-- Squaring operations are linear
-- Multiplications are nonlinear
+This requires:
+
+- squaring operations
+- multiplication operations
 
 ---
 
-## Masking Strategy (First-Order Boolean Masking)
+# Masking Strategy
 
-To protect against power analysis attacks:
+To protect against **power analysis attacks**, the design uses **first-order Boolean masking**.
 
-D is split into two shares:
+A value is split into two shares:
 
 D = D₁ ⊕ D₂
 
-All nonlinear multiplications use masked multiplication:
+Where:
+
+- D₁ = masked share
+- D₂ = random mask
+
+Neither share individually reveals the secret value.
+
+---
+
+# Masked Multiplication
+
+For masked operands:
+
+A = A₁ ⊕ A₂  
+B = B₁ ⊕ B₂  
+
+The masked product is computed as:
 
 C₁ = A₁B₁ ⊕ R  
 C₂ = A₁B₂ ⊕ A₂B₁ ⊕ A₂B₂ ⊕ R  
 
 Where:
+
 - R is fresh randomness
-- C = C₁ ⊕ C₂ gives correct result
-- Randomness cancels upon recombination
+- Final value:
 
-Squaring is linear:
+C = C₁ ⊕ C₂
 
-(a ⊕ b)² = a² ⊕ b²
-
-So squaring is performed independently per share.
+The randomness cancels during recombination.
 
 ---
 
-### 4. Compute A⁻¹
+# Completing the Inversion
 
-After obtaining D⁻¹:
-
-A⁻¹ = D⁻¹ · (a₁x + a₀)
-
-Which yields:
+After computing D⁻¹:
 
 new_a₁ = D⁻¹ · a₁  
 new_a₀ = D⁻¹ · a₀  
 
-All operations in GF(2⁴).
+This produces the inverse tower element:
 
-Masked multipliers are used here as well.
-
----
-
-### 5. Inverse Basis Transformation
-
-The inverted tower element:
-
-(new_a₁, new_a₀)
-
-is converted back to AES polynomial basis using fixed matrix T⁻¹.
-
-This is again a linear XOR network.
+A⁻¹ = new_a₁ x + new_a₀
 
 ---
 
-### 6. Affine Transformation
+# Converting Back to AES Field
 
-Final SubBytes output is computed as:
+The inverted tower element is mapped back to the AES polynomial basis:
+
+b⁻¹ = T⁻¹ · [new_a₁ new_a₀]
+
+This yields the multiplicative inverse in **GF(2⁸)**.
+
+---
+
+# Final Affine Transformation
+
+The AES S-Box output is computed as:
 
 b′ = A · b⁻¹ ⊕ c
 
 Where:
-- A is fixed 8×8 affine matrix
-- c is constant vector
-- Linear operation (safe for masking)
+
+- A = fixed AES affine matrix
+- c = affine constant vector
+
+This step is linear and safe under masking.
 
 ---
 
-## Security Notes
+# Security Characteristics
 
-- All nonlinear GF(2⁴) multiplications are masked.
-- Fresh randomness is injected per multiplication.
-- Linear transformations (basis + affine) are applied per share independently.
-- Shares must never be recombined internally before final output.
+This implementation provides:
+
+- Composite field inversion
+- First-order Boolean masking
+- No lookup tables
+- XOR + AND arithmetic only
+- Fresh randomness for nonlinear operations
+
+Linear transformations (basis change and affine transform) are applied **independently per masked share**.
 
 ---
 
-## Verification Requirement
+# Verification
 
-The final S-Box must match the official AES S-Box table exactly.
+The S-Box output must match the official AES S-Box table defined in **FIPS-197**.
 
 Example test vector:
 
-S(0x53) = 0xED
+Input:  0x53  
+Output: 0xED
 
-All 256 values must match FIPS-197 specification.
-
----
-
-## Design Characteristics
-
-- Composite field inversion (area efficient)
-- First-order Boolean masking
-- No lookup tables
-- XOR + AND based arithmetic
-- Suitable for ASIC side-channel resistant implementations
-
----
+All **256 possible inputs** must produce identical outputs to the standard AES S-Box.
