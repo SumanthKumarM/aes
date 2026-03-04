@@ -72,7 +72,7 @@ where:
 
 a₁ and a₀ are obtained using forward basis matrix:  
 
-T · b = {a₁, a₀}
+{a₁, a₀} = T · b
 
 where T is the **forward basis matrix**:  
 
