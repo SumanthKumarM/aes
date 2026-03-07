@@ -199,6 +199,407 @@ C = C₁ ⊕ C₂
 
 The randomness cancels during recombination.
 
+This is where the **True Random Number Generator (TRNG)** circuit comes into play to provide these random value.
+
+---
+# True Random Number Generator (TRNG) for Masked AES
+
+**Purpose:**
+
+This project includes a hardware **True Random Number Generator (TRNG)** used to generate **fresh randomness `R`** required for masked arithmetic in the masked AES S-Box implementation.
+
+The generated random values are used as the **fresh mask input `R`** in masked multiplication operations.
+
+---
+
+# TRNG Architecture Overview
+
+The TRNG follows a classical entropy-conditioning architecture:
+
+```
+Entropy Source
+      │
+      ▼
+XOR Mixing
+      │
+      ▼
+Sampling
+      │
+      ▼
+Health Tests
+      │
+      ▼
+Entropy Collector
+      │
+      ▼
+Keccak Conditioning
+      │
+      ▼
+Random Output Formatter
+```
+
+The final output is used as **random mask input `R`** for masked AES operations.
+
+---
+
+# Entropy Source – Ring Oscillator Array
+
+Randomness originates from **physical noise sources in CMOS circuits**.
+
+Examples include:
+
+- thermal noise
+- flicker noise
+- supply voltage variation
+- temperature fluctuation
+- transistor delay variation
+
+These physical phenomena introduce **timing jitter** in logic gate propagation delays.
+
+---
+
+## Ring Oscillator Structure
+
+Each oscillator consists of an **odd number of inverters**:
+
+```
+INV → INV → INV → ... → INV
+```
+
+An odd number of inverters ensures continuous oscillation.
+
+Configuration used in this design:
+
+32 Ring Oscillators  
+13 Inverters per Oscillator
+
+---
+
+# Entropy Amplification via XOR Mixing
+
+Each ring oscillator produces a waveform containing jitter.
+
+To improve entropy quality, oscillator outputs are combined using an XOR tree:
+
+```
+RO₀  ─────┐
+RO₁  ─────┤
+RO₂  ─────┤
+ :        ⊕ ───▶ Output
+ :        │
+RO₃₁ ─────┘
+```
+
+XOR mixing combines multiple independent noise sources, increasing entropy.
+
+---
+
+# Sampling the Entropy Signal
+
+The XOR output is sampled using a **D flip-flop driven by an independent clock**.
+
+RO XOR output → DFF → raw_bit_stream
+
+Sampling converts **timing jitter** into **digital random bits**.
+
+Each clock cycle produces one raw entropy bit.
+
+---
+
+# Health Tests
+
+The raw entropy stream is continuously monitored using runtime health tests.
+
+These tests ensure that the entropy source has not failed or become biased.
+
+Two standard tests are implemented.  
+
+**1. Repetition Count Test (RCT):**
+
+Detects if the entropy source becomes stuck.
+
+Example failure: 111111111111111111
+
+The test counts consecutive identical bits.
+
+If the repetition count exceeds a threshold, an error is raised.
+
+**2. Adaptive Proportion Test (APT):**
+
+Detects bias in the bitstream within a sliding window.
+
+window as per **NIST** standard is **1024 bits**
+
+If the number of `1` bits exceeds a statistical threshold, the entropy source is considered faulty.
+
+---
+
+# Entropy Collector
+
+The entropy source produces **one random bit per clock cycle**.
+
+To form usable entropy blocks, bits are collected using a **Serial-In Parallel-Out (SIPO) shift register**.
+
+Example:
+
+```
+raw bits: 1 0 1 1 0 0 1 0
+
+shift register output:
+
+1011
+0010
+```
+
+For cryptographic conditioning, larger entropy blocks are typically used.
+
+Example configuration:
+
+```
+entropy_pool_size = 256 bits
+```
+
+These bits are injected into the Keccak conditioning block.
+
+---
+
+# Keccak Conditioning
+
+The TRNG uses the **Keccak permutation** as a cryptographic conditioning function.
+
+Keccak is the algorithm used in **SHA-3**.
+
+Conditioning performs:
+
+- bias removal
+- correlation destruction
+- entropy diffusion
+
+---
+
+## Keccak State
+
+The permutation operates on a **1600-bit internal state**.
+
+The state is arranged as: 5 × 5 matrix of lanes
+
+Each lane contains: 64 bits
+
+Total state size: 5 × 5 × 64 = 1600 bits
+
+---
+
+## Absorb Phase
+
+Entropy bits are injected into the state using XOR:
+
+```
+state = state XOR entropy_block
+```
+
+Incoming entropy mixes with the existing state rather than overwriting it.
+
+---
+
+## Keccak Permutation
+
+The permutation **Keccak-f[1600]** executes **24 rounds**.
+
+Each round applies the following transformations:
+
+```
+θ → ρ → π → χ → ι
+```
+
+---
+
+### Theta (θ)
+
+Column parity is computed:
+
+```
+C[x] = A[x,0] ⊕ A[x,1] ⊕ A[x,2] ⊕ A[x,3] ⊕ A[x,4]
+```
+
+Columns are mixed:
+
+```
+D[x] = C[x−1] ⊕ ROT(C[x+1],1)
+```
+
+Then applied:
+
+```
+A[x,y] = A[x,y] ⊕ D[x]
+```
+
+---
+
+### Rho (ρ)
+
+Each lane undergoes a fixed rotation:
+
+```
+A[x,y] = ROT(A[x,y], offset[x,y])
+```
+
+Rotation offsets are fixed constants defined in the Keccak specification.
+
+---
+
+### Pi (π)
+
+Lanes are permuted across the matrix:
+
+```
+A'[x,y] = A[(x + 3y) mod 5][x]
+```
+
+This spreads information throughout the state.
+
+---
+
+### Chi (χ)
+
+This step introduces nonlinearity:
+
+```
+A[x,y] = A[x,y] ⊕ ((¬A[x+1,y]) ∧ A[x+2,y])
+```
+
+---
+
+### Iota (ι)
+
+A round constant is injected:
+
+```
+A[0,0] = A[0,0] ⊕ RC
+```
+
+Each round uses a different constant.
+
+---
+
+# Squeeze Phase
+
+After the permutation completes, the Keccak state contains **high-quality pseudorandom bits**.
+
+These bits are extracted sequentially:
+
+```
+state → random bit stream
+```
+
+---
+
+# Random Output Formatting
+
+The conditioned output stream is formatted into **4-bit random values**.
+
+Example:
+
+```
+random stream: 101001110010...
+
+4-bit outputs:
+
+1010
+0111
+0010
+...
+```
+
+These values serve as the **fresh randomness `R` used in masked multiplication**.
+
+---
+
+# Integration with Masked AES
+
+The TRNG supplies randomness to masked arithmetic units.
+
+Example masked multiplication:
+
+```
+C₁ = A₁B₁ ⊕ R
+C₂ = A₁B₂ ⊕ A₂B₁ ⊕ A₂B₂ ⊕ R
+```
+
+Where:
+
+```
+R = TRNG output
+```
+
+Each multiplication must use **fresh randomness**.
+
+---
+
+# Security Properties
+
+The TRNG design provides:
+
+- physical entropy source (ring oscillator jitter)
+- entropy amplification via XOR mixing
+- runtime health monitoring
+- cryptographic conditioning using Keccak
+- continuous generation of fresh randomness
+
+These properties ensure strong resistance against **first-order side-channel attacks**.
+
+---
+
+# Verification
+
+The TRNG is verified using **Cocotb-based simulation**.
+
+Verification includes:
+
+- entropy injection models
+- bias detection tests
+- stuck-bit fault tests
+- health test validation
+- Keccak permutation verification
+
+---
+
+# Summary
+
+The TRNG converts **physical hardware noise** into **cryptographically strong random numbers**.
+
+Pipeline:
+
+```
+Physical noise
+      ↓
+Ring oscillators
+      ↓
+XOR mixing
+      ↓
+Sampling
+      ↓
+Health tests
+      ↓
+Entropy collection
+      ↓
+Keccak conditioning
+      ↓
+Random mask values (R)
+```
+
+These random values protect masked AES operations against side-channel attacks.  
+
+# References
+
+The TRNG architecture implemented in this project is based on the following research paper:
+
+**Ring Oscillator Based True Random Number Generator with Keccak Conditioning**
+
+Sensors Journal (MDPI)
+
+Paper Link:  
+https://www.mdpi.com/1424-8220/25/5/1678
+
 ---
 
 # Completing the Inversion
@@ -263,3 +664,5 @@ Input:  0x53
 Output: 0xED
 
 All **256 possible inputs** must produce identical outputs to the standard AES S-Box.
+
+---
