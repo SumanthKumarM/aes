@@ -308,29 +308,21 @@ Each clock cycle produces one raw entropy bit.
 
 # Health Tests
 
-The raw entropy stream is continuously monitored using runtime health tests.
+The raw entropy stream is continuously monitored using runtime health tests. These tests ensure that the entropy source has not failed or become biased.
 
-These tests ensure that the entropy source has not failed or become biased.
+### Core Implementation
 
-Two standard tests are implemented.  
+* **Repetition Count Test (RCT)**
+    * **Purpose:** Detects if the entropy source becomes "stuck."
+    * **Mechanism:** The test monitors and counts consecutive identical bits in the stream.
+    * **Failure Condition:** If the repetition count exceeds a predefined threshold, an error is raised.
+    * **Example Failure:** `111111111111111111...`
 
-**1. Repetition Count Test (RCT):**
-
-Detects if the entropy source becomes stuck.
-
-Example failure: 111111111111111111
-
-The test counts consecutive identical bits.
-
-If the repetition count exceeds a threshold, an error is raised.
-
-**2. Adaptive Proportion Test (APT):**
-
-Detects bias in the bitstream within a sliding window.
-
-window as per **NIST** standard is **1024 bits**
-
-If the number of `1` bits exceeds a statistical threshold, the entropy source is considered faulty.
+* **Adaptive Proportion Test (APT)**
+    * **Purpose:** Detects bias in the bitstream within a specific data window.
+    * **Window Size:** **1024 bits** (as per **NIST** standard).
+    * **Mechanism:** Operates within a sliding window to check the statistical distribution of bits.
+    * **Failure Condition:** If the number of `1` bits exceeds a calculated statistical threshold, the entropy source is considered faulty.
 
 ---
 

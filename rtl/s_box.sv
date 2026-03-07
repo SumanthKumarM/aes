@@ -70,7 +70,7 @@ module s_box(
             // converting all bytes in state array to tower field
             assign a_byte[i%4][i/4] = tower_field(state[i%4][i/4]);
 
-            // computing denominator term for every tower field
+            // computing denominator term (D) for every tower field
             assign d[i%4][i/4] = denominator(a_byte[i%4][i/4]);
         end
     endgenerate
