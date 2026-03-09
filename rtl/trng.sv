@@ -32,6 +32,46 @@ module ring_osc_array (
     end
 endmodule
 
+// entropy collector
+module entropy_clctr(
+    output logic [63:0] entropy_word,
+    output logic [4:0] tx_cntr,
+    output logic valid,
+    input logic rand_bit, ready, clk, rst_n);
+
+    logic [5:0] sipo_fill_cntr; 
+
+    always_ff@(posedge clk) begin
+        if(!rst_n) begin
+            entropy_word <= 0;
+            valid <= 0;
+            tx_cntr <= 0;
+            sipo_fill_cntr <= 0;
+        end
+        // serial-in parallel-out shift register behavior
+        else begin
+            if(valid && !ready) begin  // when valid data is available that data should not be changed until receiver is ready
+                entropy_word <= entropy_word;
+                sipo_fill_cntr <= sipo_fill_cntr;
+                tx_cntr <= tx_cntr;
+            end
+            else begin
+                entropy_word <= (entropy_word << 1) | {63'd0, rand_bit};
+                sipo_fill_cntr <= sipo_fill_cntr + 1;  // increments when register gets accumulated with rand_bit
+            end
+            
+            // asserting valid signal 
+            if(valid && ready) valid <= 0;  // deasserting valid as the transaction has completed
+            else if(sipo_fill_cntr==63) valid <= valid | 1'b1;  // sticky valid that stays high until ready = 1
+            else valid <= valid;
+
+            // incrementing tx_counter 
+            if(valid && ready) tx_cntr <= (tx_cntr==24) ? 0 : tx_cntr + 1;  // when all 25 64-bit words are sent this counter resets
+            else tx_cntr <= tx_cntr;
+        end
+    end
+endmodule
+
 // NIST standard health tests 
 module health_tests (
     output logic error, total_failure,
