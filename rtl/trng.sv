@@ -77,12 +77,15 @@ endmodule
 // Keccak conditioning block
 module keccak_cond (
     output state_t rand_state,
+    output logic [1:0] rx_cntr,
     output logic ready,
     input logic [63:0] raw_entropy,
+    input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
     input logic valid, clk, rst_n);
     
-    // state matrix for Keccak conditioning block
-    state_t state;
+    state_t state;  // state matrix for Keccak conditioning block
+    logic [191:0] temp_entropy;  // to store raw entropy bits
+    logic [4:0] round_cntr;  // keeps track of number of rounds
 
     // computing theta for state matrix
     function automatic state_t theta(input state_t s);
@@ -143,6 +146,46 @@ module keccak_cond (
         s[0][0] = s[0][0] ^ round_const;
         return s;
     endfunction
+
+    always_ff@(posedge clk) begin
+        if(!rst_n) begin
+            rand_state <= 0;
+            temp_entropy <= 0;
+            round_cntr <= 0;
+            rx_cntr <= 0;
+            ready <= 0;
+        end
+        else begin
+            // initial stage: round-0
+            // state[191:0]     = true noise source entropy / feedback
+            // state[192]       = 1         (pad start)
+            // state[1342:193]  = 0         (zero padding)
+            // state[1343]      = 1         (pad end)
+            // state[1599:1344] = 0        (capacity, initialized to zero)
+            if(round_cntr==0) begin
+                if(get_raw_entropy) begin  // gets raw entropy bits from entropy collector
+                    ready <= 1;
+                    if(valid==1 && ready==1) begin
+                        temp_entropy[((rx_cntr * 64) + 63) : (rx_cntr * 64)] = temp_entropy[((rx_cntr * 64) + 63) : (rx_cntr * 64)] ^ raw_entropy;
+                        rx_cntr <= (rx_cntr==2) ? 0 : rx_cntr + 1;
+                    end
+                    else begin
+                        rand_state <= rand_state;
+                        rx_cntr <= rx_cntr;
+                    end
+                    if(rx_cntr==2) rand_state <= rand_state ^ {256'd0, 1'd1, 1250'd0, 1'd1, temp_entropy};
+                end
+                else begin  // DRBG (deterministic random bit generator) feedback path
+                    rand_state <= rand_state ^ {256'd0, 1'd1, 1250'd0, 1'd1, rand_state[191:0]};  // gets same bits from previous computation
+                end
+            end
+            else begin  // rounds 1-23
+                
+            end
+
+            round_cntr <= (round_cntr==23) ? 0 : round_cntr + 1;  // updating round_cntr
+        end
+    end
 endmodule
 
 // NIST standard health tests 
