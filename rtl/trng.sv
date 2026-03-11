@@ -1,5 +1,7 @@
 import ro_param_pkg::*;
 
+typedef logic [4:0][4:0][63:0] state_t;
+
 // noise source
 module ring_osc_array (
     output var logic rand_bit,
@@ -35,7 +37,7 @@ endmodule
 // entropy collector
 module entropy_clctr(
     output logic [63:0] entropy_word,
-    output logic [4:0] tx_cntr,
+    output logic [1:0] tx_cntr,
     output logic valid,
     input logic rand_bit, ready, clk, rst_n);
 
@@ -66,10 +68,65 @@ module entropy_clctr(
             else valid <= valid;
 
             // incrementing tx_counter 
-            if(valid && ready) tx_cntr <= (tx_cntr==24) ? 0 : tx_cntr + 1;  // when all 25 64-bit words are sent this counter resets
+            if(valid && ready) tx_cntr <= (tx_cntr==2) ? 0 : tx_cntr + 1;  // when all 3 64-bit words are sent this counter resets
             else tx_cntr <= tx_cntr;
         end
     end
+endmodule
+
+// Keccak conditioning block
+module keccak_cond (
+    output state_t rand_state,
+    input logic [63:0] raw_entropy,
+    input logic clk, rst_n);
+    
+    // state matrix for Keccak conditioning block
+    state_t state;
+
+    // computing theta for state matrix
+    function automatic state_t theta(input state_t s);
+        logic [4:0][63:0] c;  // column parity bits
+        logic [4:0][63:0] d, c_rot;  // theta diffusion term, left rotation of c
+
+        for(int i=0; i<5; i++) begin
+            // computing column parity
+            c[i] = s[0][i] ^ s[1][i] ^ s[2][i] ^ s[3][i] ^ s[4][i]; 
+
+            // computing theta diffusion term : D[x] = C[x−1] ⊕ ROT(C[x+1],1)
+            int m = (i==0) ? 4 : (i-1);
+            int n = (i==4) ? 0 : (i+1);
+            c_rot[i] = {c[3:0], c[4]};  // left rotation
+            d[i] = c[m] ^ c_rot[n];
+        end
+
+        // applying diffusion
+        state_t diff_state;
+        for(int i=0; i<25; i++) begin
+            diff_state[i/5][i%5] = diff_state[i/5][i%5] ^ d[i%5];
+        end
+
+        return diff_state;
+    endfunction
+
+    // computing rho for state matrix
+    function automatic state_t rho(input state_t s);
+        for(int i=0; i<25; i++) begin
+            if(i==0) s[0][0] = s[0][0];
+            else s[i/5][i%5] = {s[i/5][i%5][63-RHO_OFFSETS[i/5][i%5] : 0], s[i/5][i%5][63 : 64-RHO_OFFSETS[i/5][i%5]]};
+        end
+        return s;
+    endfunction
+
+    // computing pi for state matrix
+    function automatic state_t pi(input state_t s);
+        state_t temp;
+        for(int i=0; i<25; i++) begin
+            int x = i/5;  // rows
+            int y = i%5;  // columns
+            temp[x][y] = s[(x + (3*y)) % 5][x];
+        end
+        return temp;
+    endfunction
 endmodule
 
 // NIST standard health tests 
