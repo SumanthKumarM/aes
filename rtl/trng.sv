@@ -77,8 +77,9 @@ endmodule
 // Keccak conditioning block
 module keccak_cond (
     output state_t rand_state,
+    output logic ready,
     input logic [63:0] raw_entropy,
-    input logic clk, rst_n);
+    input logic valid, clk, rst_n);
     
     // state matrix for Keccak conditioning block
     state_t state;
@@ -126,6 +127,21 @@ module keccak_cond (
             temp[x][y] = s[(x + (3*y)) % 5][x];
         end
         return temp;
+    endfunction
+
+    // computing chi which is non-linear
+    function automatic state_t chi(input state_t s);
+        state_t temp;
+        for(int i=0; i<25; i++) begin
+            temp[i/5][i%5] = s[i/5][i%5] ^ (~s[i/5][(i%5)+1] & s[i/5][(i%5)+2]);
+        end
+        return temp;
+    endfunction
+
+    // computing iota for state matrix
+    function automatic state_t iota(input state_t s, logic [63:0] round_const);
+        s[0][0] = s[0][0] ^ round_const;
+        return s;
     endfunction
 endmodule
 

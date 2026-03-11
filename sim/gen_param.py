@@ -1,6 +1,10 @@
-import numpy as np
-from scipy.stats import binom
+import os
 import math
+import numpy as np
+from pathlib import Path
+from scipy.stats import binom
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # configuration
 N_RO = 32               # number of parallel ring oscillators
@@ -51,7 +55,30 @@ P(X >= C) <= alpha is strictly satisfied
 apt_icdf = binom.ppf(1 - ALPHA, APT_BIT_WINDOW, p)
 APT_THRESHOLD = int(apt_icdf) + 1
 
-OUTPUT_FILE = "../rtl/ro_param_pkg.sv"
+# Keccak round constants
+def keccak_round_constants():
+  lfsr = 0x01
+  RC = [0]*24
+
+  for i in range(24):
+    rc = 0
+    for j in range(7):
+      if lfsr & 0x01:
+        rc ^= 1 << ((1 << j) - 1)
+
+      # advance LFSR (polynomial x^8 + x^6 + x^5 + x^4 + 1)
+      if lfsr & 0x80:
+        lfsr = ((lfsr << 1) & 0xFF) ^ 0x71
+      else:
+        lfsr = (lfsr << 1) & 0xFF
+
+    RC[i] = rc
+
+  return RC
+
+KECCAK_RC = keccak_round_constants()
+
+OUTPUT_FILE = SCRIPT_DIR / ".." / "rtl" / "ro_param_pkg.sv"
 
 # Each RO gets a unique base mean drawn from [MEAN_LOW, MEAN_HIGH].
 # This models inter-oscillator frequency spread due to manufacturing variation.
@@ -59,25 +86,25 @@ OUTPUT_FILE = "../rtl/ro_param_pkg.sv"
 # perturbation (µ=0, σ=SIGMA) — this is the cycle-to-cycle jitter that
 # is the actual entropy source.
 ro_means = rng.uniform(MEAN_LOW, MEAN_HIGH, size=N_RO)          # shape (N_RO,)
-jitter   = rng.normal(0, SIGMA, size=(N_RO, N_INV))             # shape (N_RO, N_INV)
-delays   = np.abs(ro_means[:, np.newaxis] + jitter)             # ensure positive ps
+jitter = rng.normal(0, SIGMA, size=(N_RO, N_INV))             # shape (N_RO, N_INV)
+delays = np.abs(ro_means[:, np.newaxis] + jitter)             # ensure positive ps
 
 # format helpers 
 def ps_to_timescale(ps: float) -> str:
-    """
-    Convert a picosecond value to a `timescale 1ps/1ps compatible integer.
-    We round to the nearest integer ps so the value is usable as a
-    Verilog delay literal without fractional precision issues.
-    """
-    return str(int(round(ps)))
+  """
+  Convert a picosecond value to a `timescale 1ps/1ps compatible integer.
+  We round to the nearest integer ps so the value is usable as a
+  Verilog delay literal without fractional precision issues.
+  """
+  return str(int(round(ps)))
 
 # 5x5 Rho Offsets Matrix
 rho_matrix = [
-  [0,  36,  3,  41,  18],
-  [1,  44,  10, 45,  2],
-  [62, 6,   43, 15,  61],
-  [28, 55,  25, 21,  56],
-  [27, 20,  39, 8,   14]
+  [0, 36, 3, 41, 18],
+  [1, 44, 10, 45, 2],
+  [62, 6, 43, 15, 61],
+  [28, 55, 25, 21, 56],
+  [27, 20, 39, 8, 14]
 ]
 
 # build package string 
@@ -121,15 +148,24 @@ for i, row in enumerate(rho_matrix):
 
 lines.append("  };")
 lines.append("")
+lines.append("  // Keccak-f[1600] Round Constants")
+lines.append("  localparam logic [63:0] KECCAK_RC [0:23] = '{")
+
+for i, rc in enumerate(KECCAK_RC):
+  comma = "," if i < 23 else ""
+  lines.append(f"    64'h{rc:016X}{comma}")
+
+lines.append("  };")
+lines.append("")
 lines.append("  // INV_DELAY[ro_index][inv_index] — propagation delay in ps")
 lines.append("  // Outer dimension: RO index (0 to N_RO-1)")
 lines.append("  // Inner dimension: inverter stage index (0 to N_INV-1)")
 lines.append(f"  localparam int INV_DELAY [0:{N_RO-1}][0:{N_INV-1}] = '{{")
 
 for i in range(N_RO):
-    inv_vals = ", ".join(ps_to_timescale(delays[i][j]) for j in range(N_INV))
-    comma = "," if i < N_RO - 1 else ""
-    lines.append(f"    /* RO[{i:02d}] */ '{{{inv_vals}}}{comma}")
+  inv_vals = ", ".join(ps_to_timescale(delays[i][j]) for j in range(N_INV))
+  comma = "," if i < N_RO - 1 else ""
+  lines.append(f"    /* RO[{i:02d}] */ '{{{inv_vals}}}{comma}")
 
 lines.append("  };")
 lines.append("")
@@ -147,7 +183,7 @@ sv_text = "\n".join(lines)
 
 # write output 
 with open(OUTPUT_FILE, "w") as f:
-    f.write(sv_text)
+  f.write(sv_text)
 
 print(f"Generated '{OUTPUT_FILE}'")
 print(f"  ROs               : {N_RO}")
