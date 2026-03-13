@@ -304,7 +304,7 @@ typedef enum logic [2:0] {IDLE, BIST, WAIT_FOR_ACK,
 module control_unit(
     output logic noise_src_enb_n, enb_health_tests, get_raw_entropy,
     send_req, local_rst_n, dead_flag, cont_permute,
-    input logic ext_enable, health_error, total_failure, get_ack, 
+    input logic health_error, total_failure, get_ack, 
     Keccak_ready, clk, ext_rst_n);
 
     localparam DRBG_CNTR_WIDTH = $clog2(DRBG_CYCLES);
@@ -329,6 +329,7 @@ module control_unit(
         else begin
             case(fsm_state)
                 IDLE: begin
+                    // this state provides the TRNG to stabilize and maintain its states before performing actual operations
                     noise_src_enb_n <= 1;  // making oscilattor stable
                     enb_health_tests <= 0;  // disabling health tests module
                     get_raw_entropy <= 0;  // disables raw entropy as default
@@ -337,9 +338,8 @@ module control_unit(
                     drbg_cntr <= drbg_cntr;
                     local_rst_n <= 1; 
                     cont_permute <= 1;
-                    // transitions to BIST when it receives external enable or else keeps on waiting
-                    // in IDLE state until external enable arrives
-                    fsm_state <= (ext_enable == 1) ? BIST : IDLE; 
+                    // unconditionally transitions to BIST state
+                    fsm_state <= BIST; 
                 end 
                 BIST: begin
                     send_req <=0;
@@ -385,7 +385,13 @@ module control_unit(
                     // block to continue permuatate while AES_GCM block consumes random words parallely
                     cont_permute <= (get_ack) ? 1 : 0;  
 
-                    fsm_state <= (get_ack) ? BIST : WAIT_FOR_ACK;  // keeps on waiting for acknowledgement
+                    // state transition
+                    case({total_failure, health_error})
+                        2'b00: fsm_state <= (get_ack) ? BIST : WAIT_FOR_ACK;  // keeps on waiting until acknowledgement is received
+                        2'b01: fsm_state <= ERROR_RECOVERY;  // since an error has occurred, goes to error recovery state
+                        2'b10, 2'b11: fsm_state <= DEAD;  // since both cases have total_failure = 1, goes to DEAD state waiting for external reset 
+                        default: fsm_state <= WAIT_FOR_ACK; 
+                    endcase
                 end
                 ERROR_RECOVERY: begin
                     // resets noise source, entropy collector and Keccak conditioning block 
@@ -411,19 +417,18 @@ module control_unit(
                     end
                 end
                 DEAD: begin
-                    // holding their previous state
-                    noise_src_enb_n <= noise_src_enb_n;
-                    enb_health_tests <= enb_health_tests;
-                    get_raw_entropy <= get_raw_entropy;
-                    send_req <= send_req;
-                    drbg_cntr <= drbg_cntr;
-                    local_rst_n <= local_rst_n;
-                    err_state_delay <= err_state_delay;
-
+                    // deasserting signals as total failure occurred
+                    noise_src_enb_n <= 1;
+                    enb_health_tests <= 0;
+                    get_raw_entropy <= 0;
+                    send_req <= 0;
+                    drbg_cntr <= 0;
+                    err_state_delay <= 0;
                     cont_permute <= 0;  // holding Keccak conditioning block from continuing further
 
                     // asseting dead_flag and waiting for external reset
                     dead_flag <= 1;
+                    local_rst_n <= (ext_rst_n == 0) ? 0 : 1;  // restting other blocks
                     fsm_state <= (ext_rst_n == 0) ? IDLE : DEAD;
                 end
                 default: fsm_state <= IDLE;
