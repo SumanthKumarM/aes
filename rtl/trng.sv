@@ -7,17 +7,17 @@ module trng(
     output logic key_ready_req,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
     input logic s_box_ack,  // S-box acknowledges receipt of random words
+    input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic clk, ext_rst_n);
 
-    logic rand_bit_raw;  // noise source output (sampling_clk domain)
     logic rand_bit_sync1, rand_bit;  // CDC synchronized rand_bit (clk domain)
 
     // CDC synchronized control signals (sampling_clk domain)
     logic noise_enb_sync1, noise_enb_n;
     logic noise_rst_sync1, noise_rst_n;
 
-    // entropy collector ↔ keccak handshake
+    // entropy collector - keccak handshake
     logic [63:0] entropy_word;
     logic valid, ready;
 
@@ -40,8 +40,8 @@ module trng(
             rand_bit <= 0;
         end
         else begin
-            rand_bit_sync1 <= rand_bit_raw;  // first flop
-            rand_bit <= rand_bit_sync1;  // second flop
+            rand_bit_sync1 <= raw_rand_bit;  // first flip-flop
+            rand_bit <= rand_bit_sync1;  // second flip-flop
         end
     end
 
@@ -69,9 +69,6 @@ module trng(
         end
     end
 
-    // noise source (sampling_clk domain)
-    ring_osc_array noise_src(rand_bit_raw, sampling_clk, noise_enb_n, noise_rst_n);
-
     // entropy collector (clk domain)    
     entropy_clctr entropy_col(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
 
@@ -85,40 +82,6 @@ module trng(
     // control unit (clk domain)
     control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, 
     health_error, total_failure, key_ready_req, clk, ext_rst_n);
-endmodule
-
-// noise source
-module ring_osc_array (
-    output var logic rand_bit,
-    input sampling_clk, enb_n, rst_n);
-
-    genvar i, j;
-    wire logic [N_RO-1 : 0][N_INV-1 : 0] inv;
-    logic [N_RO-1 : 0] q;
-
-    // creating ring oscillator arrays
-    generate
-        for(i=0; i<N_RO; i++) begin // ring scillator arrays
-            for(j=0; j<N_INV-1; j++) begin // ring oscillators - cascaded inverters
-                assign #(INV_DELAY[i][j]) inv[i][j+1] = ~inv[i][j];
-            end
-            // enable is active low because when high the oscillator goes into stable mode
-            // and when it's low then actual oscillation happen
-            assign #(INV_DELAY[i][N_INV-1]) inv[i][0] = ~(enb_n | inv[i][N_INV-1]);
-        end
-    endgenerate
-
-    // sampling each ring oscillator's output with resepct to sampling clock
-    always_ff @(posedge sampling_clk) begin 
-        if(!rst_n) begin 
-            q <= 0;
-            rand_bit <= 0;
-        end
-        else begin
-            for(int i=0; i<N_RO; i++) q[i] <= inv[i][N_INV-1];
-            rand_bit <= ^q;
-        end
-    end
 endmodule
 
 // entropy collector
@@ -173,6 +136,10 @@ module keccak_cond (
     logic [1:0] rx_cntr;  // keeps track of handshakes
     logic [2:0] word_tx_cntr;  // keeps track of random 64-bit words that are being sent to AES_GCM
     Keccak_states fsm_state;  
+
+    // flattening state matrix to access slices of it
+    logic [1599:0] state_flat;
+    assign state_flat = {>>{state}};
 
     // computing theta for state matrix
     function automatic state_t theta(input state_t s);
@@ -287,7 +254,7 @@ module keccak_cond (
                         end
                     end
                     else begin  // DRBG (deterministic random bit generator) feedback path
-                        state <= state ^ {256'd0, 1'd1, 1150'd0, 1'd1, state[191:0]};  // gets same bits from previous computation
+                        state <= state ^ {256'd0, 1'd1, 1150'd0, 1'd1, state[0][2:0]};  // gets same bits from previous computation
                         fsm_state <= PERMUTE;
                     end
                 end 
@@ -302,14 +269,14 @@ module keccak_cond (
                     fsm_state <= (round_cntr == 23) ? SQUEEZ : PERMUTE;
                 end
                 SQUEEZ: begin
-                    temp_entropy <= state[191:0];
+                    temp_entropy <= state[0][2:0];
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    if(s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
+                    if(word_tx_cntr < 6 && s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
                     else if(word_tx_cntr == 6) word_tx_cntr <= 0;
                     else word_tx_cntr <= word_tx_cntr;
-                    rand_word <= (word_tx_cntr != 6) ? state[(word_tx_cntr << 8) +: 256] : 0;  // PISO logic to send 64-bit rand words to AES_GCM block
+                    rand_word <= (word_tx_cntr != 6) ? state_flat[(11'(word_tx_cntr) << 8) +: 256] : 0;  // PISO logic to send 64-bit rand words to AES_GCM block
 
                     // when random key is available key_ready_req becomes high and when all data is sent it becomes low
                     key_ready_req <= (word_tx_cntr != 6) ? key_ready_req | 1'b1 : 0;
@@ -426,7 +393,7 @@ module control_unit(
             get_raw_entropy <= 0;
             dead_flag <= 0;
             drbg_cntr <= 0;
-            local_rst_n <= 1;
+            local_rst_n <= 0;
             err_state_delay <= 0;
         end
         else begin
@@ -513,12 +480,20 @@ module control_unit(
                     enb_health_tests <= 0;
                     get_raw_entropy <= 0;
                     drbg_cntr <= 0;
-                    err_state_delay <= 0;
 
                     // asseting dead_flag and waiting for external reset
                     dead_flag <= 1;
                     local_rst_n <= (ext_rst_n == 0) ? 0 : 1;  // restting other blocks
-                    fsm_state <= (ext_rst_n == 0) ? IDLE : DEAD;
+
+                    err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
+                    if(err_state_delay) begin
+                        fsm_state <= IDLE;
+                        err_state_delay <= 0;  // resetting it for next iteration
+                    end
+                    else begin
+                        fsm_state <= DEAD;
+                        err_state_delay <= err_state_delay;
+                    end
                 end
                 default: fsm_state <= IDLE;
             endcase
