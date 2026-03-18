@@ -73,7 +73,7 @@ module trng(
     entropy_clctr entropy_col(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
 
     // health tests (clk domain)
-    health_tests hlth_tst(health_error, total_failure, rand_bit, enb_health_tests, clk, local_rst_n);
+    health_tests hlth_tst(health_error, total_failure, rand_bit, enb_health_tests, clk, ext_rst_n);
 
     // keccak conditioning block (clk domain)
     keccak_cond keccak(rand_word, ready, key_ready_req, entropy_word, 
@@ -276,12 +276,13 @@ module keccak_cond (
                     if(word_tx_cntr < 6 && s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
                     else if(word_tx_cntr == 6) word_tx_cntr <= 0;
                     else word_tx_cntr <= word_tx_cntr;
-                    rand_word <= (word_tx_cntr != 6) ? state_flat[(11'(word_tx_cntr) << 8) +: 256] : 0;  // PISO logic to send 64-bit rand words to AES_GCM block
+
+                    // PISO logic to send 64-bit rand words to AES_GCM block
+                    rand_word <= (word_tx_cntr != 6) ? state_flat[(11'(word_tx_cntr) << 8) +: 256] : 0;  
 
                     // when random key is available key_ready_req becomes high and when all data is sent it becomes low
-                    key_ready_req <= (word_tx_cntr != 6) ? key_ready_req | 1'b1 : 0;
-                    // if cont_permute is high then this block can continue permutating or else it 
-                    // has to hold its output key and wait
+                    key_ready_req <= (word_tx_cntr != 6) ? 1'b1 : 0;
+                    
                     fsm_state <= (word_tx_cntr == 6) ? ABSORB : SQUEEZ;  
                 end
                 default: fsm_state <= ABSORB;
@@ -465,14 +466,7 @@ module control_unit(
                     drbg_cntr <= 0;  // resetting this so that Keccak block can start using raw entropy instead of DRBG feedback
 
                     err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
-                    if(err_state_delay) begin
-                        fsm_state <= BIST;
-                        err_state_delay <= 0;  // resetting it for next iteration
-                    end
-                    else begin
-                        fsm_state <= ERROR_RECOVERY;
-                        err_state_delay <= err_state_delay;
-                    end
+                    fsm_state <= (err_state_delay) ? BIST : ERROR_RECOVERY;
                 end
                 DEAD: begin
                     // deasserting signals as total failure occurred
@@ -486,14 +480,7 @@ module control_unit(
                     local_rst_n <= (ext_rst_n == 0) ? 0 : 1;  // restting other blocks
 
                     err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
-                    if(err_state_delay) begin
-                        fsm_state <= IDLE;
-                        err_state_delay <= 0;  // resetting it for next iteration
-                    end
-                    else begin
-                        fsm_state <= DEAD;
-                        err_state_delay <= err_state_delay;
-                    end
+                    fsm_state <= (err_state_delay) ? IDLE : DEAD;
                 end
                 default: fsm_state <= IDLE;
             endcase

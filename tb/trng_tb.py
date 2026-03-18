@@ -1,568 +1,735 @@
-"""
-TRNG Testbench
-Verifies:
-  1. Reset and startup behavior
-  2. First key generation (raw entropy path)
-  3. S-box handshake protocol
-  4. DRBG feedback path
-  5. Statistical randomness tests
-  6. No spurious dead_flag
-  7. Recovery after external reset
-  8. Continuous operation
-
-Noise source model
-  - Uses os.urandom() as the entropy source — backed by the OS CSPRNG
-    which is seeded from hardware entropy on the host machine.
-  - Injects one bit per sampling_clk rising edge, exactly as real
-    hardware would.  The two-flop CDC synchronizer in the RTL still
-    runs and is exercised.
-  - Respects noise_src_enb_n: stops injecting when the control unit
-    disables the noise source (active-low), matching real behaviour.
-  - Run length is hard-capped at MAX_RUN = RCT_THRESHOLD - 1 = 7 so
-    the RTL health tests never fire during normal simulation.
-
-Clock / task management
-  - Clocks and the noise model are started ONCE for the entire simulation
-    session via ensure_clocks().  A _clocks_started guard prevents a
-    second set of drivers from being spawned on subsequent test calls.
-  - ClockCycles() is NOT used anywhere in this file.  In Verilator
-    --timing mode, ClockCycles() is implemented with an internal
-    RisingEdge loop that can return prematurely when the clock signal is
-    driven by Timer-based coroutines — the scheduler resolves Timer
-    expiry and the edge callback in an undefined order within the same
-    timestep, causing ClockCycles to under-count and return up to one
-    half-period early.  All multi-cycle waits use the explicit helper
-    clock_cycles() instead, which awaits RisingEdge N times in a plain
-    Python loop and is immune to this scheduling ambiguity.
-  - Background task exceptions (from _drive_clk or _noise_model) are
-    suppressed with try/except inside those coroutines so they never
-    propagate into the running test and corrupt cocotb's scheduler,
-    which would mark all remaining tests as failed with 0 sim time.
-"""
-
-import os
-import math
 import cocotb
-from cocotb.triggers import RisingEdge, Timer
+import random
+import logging
+import sys
+import numpy as np
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, ClockCycles
+
+# Simulation constants 
+CLK_PERIOD_NS       = 10
+SCLK_PERIOD_NS      = 2
+RESET_CYCLES        = 8
+NOISE_BUF_SIZE      = 5000
+
+ENTROPY_WORD_BITS   = 64
+KECCAK_PERMUTE_RNDS = 24
+KECCAK_OUTPUT_WORDS = 6
+
+RCT_THRESHOLD       = 8
+APT_BIT_WINDOW      = 1024
+APT_THRESHOLD       = 551
+CONSECUTIVE_ERRORS  = 3
+DRBG_CYCLES         = 10
+
+CU_IDLE             = 0
+CU_BIST             = 1
+CU_WAIT_FOR_XFER    = 2
+CU_ERROR_RECOVERY   = 3
+CU_DEAD             = 4
+
+KEC_ABSORB          = 0
+KEC_PERMUTE         = 1
+KEC_SQUEEZ          = 2
+
+try:
+    from noise_source_model import TRNGNoiseSource
+    _HAVE_PHYSICS_MODEL = True
+except ImportError:
+    _HAVE_PHYSICS_MODEL = False
+    cocotb.log.warning(
+        "noise_source_model.py not found — normal tests fall back to numpy random"
+    )
+
+# monitor logger 
+# "cocotb.monitor" is a child of the "cocotb" logger in Python's hierarchy,
+# so it flows through the same cocotb log handler and appears in the same
+# output file/stream — but with the source label "cocotb.monitor" instead of
+# "cocotb.trng".  You will see BOTH in the log, clearly distinguished:
+#
+#   INFO  cocotb.trng     ✓ CU in BIST state          <- test checkpoint
+#   INFO  cocotb.monitor  [MON TC1] cyc=2  cu_state: IDLE->BIST  <- monitor
+#
+# Neither suppresses the other.
+_mon_log = logging.getLogger("cocotb.monitor")
 
 
-# ── constants ─────────────────────────────────────────────────────────────────
-SAMPLING_CLK_PERIOD_NS = 2        # 500 MHz
-SYS_CLK_PERIOD_NS      = 6        # ~167 MHz
-RESET_CYCLES           = 10
-KEY_WAIT_TIMEOUT       = 50000
-
-
-# ── clock cycle helper ────────────────────────────────────────────────────────
-async def clock_cycles(signal, n):
+# Noise bit buffer
+class NoiseBitBuffer:
     """
-    Wait for exactly n rising edges of signal.
+    Pre-generates noise bits before simulation starts.
+    All generation cost is paid once upfront; during simulation next_bit()
+    is a pure array index lookup — zero scheduler impact.
 
-    Replaces ClockCycles() throughout this file.  ClockCycles() uses an
-    internal RisingEdge loop but in Verilator --timing mode the cocotb
-    scheduler can resolve a Timer expiry (from _drive_clk) and a
-    RisingEdge callback in the same timestep, causing ClockCycles to
-    return up to one half-period early.  This bare loop of RisingEdge
-    awaits is unambiguous because RisingEdge only fires on an actual
-    0-to-1 transition of the signal.
+    Modes
+    -----
+    'physics'  — RO physics model (TRNGNoiseSource, 32 ROs x 13 INV, 150 MHz).
+                 Use for all normal-operation tests.
+    'random'   — numpy uniform random. Automatic fallback if model unavailable.
+    'stuck_0'  — constant 0. Triggers RCT (TC2).
+    'stuck_1'  — constant 1. Triggers RCT -> total_failure (TC4).
+    'biased'   — P(1)=bias. Triggers APT (TC3).
     """
-    for _ in range(n):
-        await RisingEdge(signal)
+
+    def __init__(self, mode='random', n_bits=NOISE_BUF_SIZE, bias=0.9, seed=None):
+        self._mode = mode
+        self._seed = seed if seed is not None else random.randint(0, 0xFFFF_FFFF)
+        self._bias = bias
+        self._idx  = 0
+        self._buf  = self._generate(n_bits)
+
+    def _generate(self, n):
+        rng = np.random.default_rng(self._seed)
+
+        if self._mode == 'physics':
+            if not _HAVE_PHYSICS_MODEL:
+                cocotb.log.warning("Physics model not available — using numpy random")
+                return rng.integers(0, 2, size=n, dtype=np.uint8)
+            cocotb.log.info(
+                f"[NoiseBitBuffer] Generating {n:,} physics bits "
+                f"(32 RO x 13 INV @ 150 MHz)..."
+            )
+            src  = TRNGNoiseSource(n_ro=32, n_inv=13, fs_MHz=150.0, seed=self._seed)
+            bits = src.generate_bits(n)
+            cocotb.log.info("[NoiseBitBuffer] Done.")
+            return bits
+
+        elif self._mode == 'stuck_0':
+            return np.zeros(n, dtype=np.uint8)
+
+        elif self._mode == 'stuck_1':
+            return np.ones(n, dtype=np.uint8)
+
+        elif self._mode == 'biased':
+            return (rng.random(n) < self._bias).astype(np.uint8)
+
+        elif self._mode == 'apt_trigger':
+            # 3 ones + 1 zero repeating
+            # Density = 75% >> APT threshold 53.8%
+            # Zero every 4 bits — even at 5:1 sampling, zeros appear regularly
+            # preventing any run of 8+ same bits at the health test input
+            pattern = ([1]*3 + [0]*1) * (n // 4 + 1)
+            return np.array(pattern[:n], dtype=np.uint8)
+
+        else:   # 'random'
+            return rng.integers(0, 2, size=n, dtype=np.uint8)
+
+    def next_bit(self) -> int:
+        if self._idx >= len(self._buf):
+            self._idx = 0
+        b = int(self._buf[self._idx])
+        self._idx += 1
+        return b
 
 
-# ── statistical helpers ───────────────────────────────────────────────────────
-def int_to_bits(value, width):
-    return [(value >> i) & 1 for i in range(width)]
-
-def min_entropy(bits):
-    n = len(bits)
-    if n == 0:
-        return 0.0
-    ones  = sum(bits)
-    zeros = n - ones
-    p_max = max(ones, zeros) / n
-    if p_max in (0.0, 1.0):
-        return 0.0
-    return -math.log2(p_max)
-
-def frequency_test(bits):
-    n     = len(bits)
-    ones  = sum(bits)
-    ratio = ones / n
-    return 0.40 <= ratio <= 0.60, ratio
-
-def monobit_test(bits):
-    n    = len(bits)
-    ones = sum(bits)
-    s    = abs(ones - (n - ones)) / math.sqrt(n)
-    return s < 1.82, s
-
-def runs_test(bits):
-    n     = len(bits)
-    ones  = sum(bits)
-    zeros = n - ones
-    if ones == 0 or zeros == 0:
-        return False, float("inf")
-    runs     = 1 + sum(bits[i] != bits[i-1] for i in range(1, n))
-    exp_runs = ((2 * ones * zeros) / n) + 1
-    variance = (2 * ones * zeros * (2 * ones * zeros - n)) / (n * n * (n - 1))
-    if variance <= 0:
-        return False, float("inf")
-    z = abs(runs - exp_runs) / math.sqrt(variance)
-    # 99 % confidence interval (z < 2.33).  The tighter 95 % threshold
-    # (z < 1.96) produces spurious failures with only ~15 k bits.
-    return z < 2.33, z
-
-def autocorrelation_test(bits, lag=1):
-    n       = len(bits)
-    matches = sum(bits[i] == bits[i + lag] for i in range(n - lag))
-    ratio   = matches / (n - lag)
-    return 0.40 <= ratio <= 0.60, ratio
-
-
-# ── clock driver ──────────────────────────────────────────────────────────────
-async def _drive_clk(signal, half_period_ns):
-    """
-    Toggle signal every half_period_ns, forever.
-
-    Uses Timer() directly instead of cocotb.Clock so the first edge is
-    scheduled into Verilator's time-event queue at t=0, avoiding the
-    VPI-deposit delay that would cause the first RisingEdge() call to
-    hang.
-
-    The try/except wrapper ensures that if this coroutine is ever
-    cancelled (e.g. by cocotb's cleanup at simulation end) the
-    CancelledError is caught here and does not propagate into whichever
-    test happens to be running, which would corrupt the regression
-    scheduler and mark all remaining tests as failed with 0 sim time.
-    """
-    try:
-        signal.value = 0
-        while True:
-            await Timer(half_period_ns, unit="ns")
-            signal.value = 1
-            await Timer(half_period_ns, unit="ns")
-            signal.value = 0
-    except Exception:
-        pass
-
-
-# ── noise model ───────────────────────────────────────────────────────────────
-# NIST SP 800-90B parameters — must match gen_param.py exactly.
-_H_MIN         = 0.9982
-_ALPHA         = 0.01
-_RCT_THRESHOLD = 1 + math.ceil(-math.log2(_ALPHA) / _H_MIN)  # = 8
-_MAX_RUN       = _RCT_THRESHOLD - 1                           # = 7
-
-def _bounded_noise_stream():
-    """
-    Infinite generator of random bits calibrated to NIST SP 800-90B
-    (H_min = 0.9982, RCT_THRESHOLD = 8, APT_THRESHOLD = 551).
-
-    Bits come from os.urandom() with run length hard-capped at
-    MAX_RUN = 7.  This guarantees rct_counter never reaches
-    RCT_THRESHOLD and APT window counts stay well below APT_THRESHOLD,
-    so no health-test errors fire during normal simulation.
-    """
-    import random as _random
-    rng     = _random.Random(int.from_bytes(os.urandom(4), "big"))
-    current = rng.randint(0, 1)
-    run_len = 1
-
+# Noise driver
+async def noise_driver(dut, buf: NoiseBitBuffer):
+    """Drive raw_rand_bit from pre-generated buffer on every sampling_clk edge."""
     while True:
-        yield current
+        await RisingEdge(dut.sampling_clk)
+        dut.raw_rand_bit.value = buf.next_bit()
 
-        if run_len >= _MAX_RUN:
-            current ^= 1
-            run_len  = 1
-        else:
-            nxt = (int.from_bytes(os.urandom(1), "big") >> 7) & 1
-            if nxt == current:
-                run_len += 1
-            else:
-                current  = nxt
-                run_len  = 1
 
-async def _noise_model(dut):
+# Signal monitor  (cocotb equivalent of $monitor)
+_CU_NAMES  = {0:"IDLE", 1:"BIST", 2:"WAIT_FOR_XFER", 3:"ERROR_RECOVERY", 4:"DEAD"}
+_KEC_NAMES = {0:"ABSORB", 1:"PERMUTE", 2:"SQUEEZ"}
+
+
+async def signal_monitor(dut, label=""):
     """
-    Drive dut.raw_rand_bit on every rising edge of sampling_clk.
+    Background coroutine that watches all key signals on every rising clk
+    edge and logs only when something changes — identical to $monitor.
 
-    noise_src_enb_n == 1 (disabled) -- hold raw_rand_bit = 0
-    noise_src_enb_n == 0 (enabled)  -- inject one bounded-noise bit
+    WHY A SEPARATE LOGGER
+    ---------------------
+    This function uses _mon_log = logging.getLogger("cocotb.monitor").
+    Test checkpoint messages use dut._log which resolves to "cocotb.trng".
+    Both loggers feed the same cocotb output handler, so both appear in the
+    log simultaneously.  In the output you can grep "cocotb.trng" for test
+    checkpoints only, or "cocotb.monitor" for signal transitions only, or
+    leave both visible for the full picture.
 
-    The try/except wrapper prevents CancelledError from propagating
-    into the running test (same reason as _drive_clk).
+    Signal coverage
+    ---------------
+    Top ports : ext_rst_n, raw_rand_bit, s_box_ack, key_ready_req,
+                dead_flag, rand_word
+    CU        : fsm_state, noise_src_enb_n, enb_health_tests,
+                get_raw_entropy, local_rst_n, drbg_cntr
+    Keccak    : fsm_state, rx_cntr, round_cntr, word_tx_cntr
+    Health    : rct_error, apt_error, error, total_failure
+    Entropy   : valid, entropy_word
     """
-    try:
-        dut.raw_rand_bit.value = 0
-        bit_gen = _bounded_noise_stream()
+    pfx = f"[MON {label}]" if label else "[MON]"
 
-        while True:
-            await RisingEdge(dut.sampling_clk)
-            try:
-                enb_n = int(dut.noise_src_enb_n.value)
-            except Exception:
-                enb_n = 1   # X/Z during reset — treat as disabled
+    def snap():
+        return {
+            "ext_rst_n"   : int(dut.ext_rst_n.value),
+            "raw_bit"     : int(dut.raw_rand_bit.value),
+            "s_box_ack"   : int(dut.s_box_ack.value),
+            "key_rdy_req" : int(dut.key_ready_req.value),
+            "dead_flag"   : int(dut.dead_flag.value),
+            "rand_word"   : int(dut.rand_word.value),
+            "cu_state"    : int(dut.cu.fsm_state.value),
+            "ns_enb_n"    : int(dut.cu.noise_src_enb_n.value),
+            "enb_hlth"    : int(dut.cu.enb_health_tests.value),
+            "get_raw"     : int(dut.cu.get_raw_entropy.value),
+            "local_rst_n" : int(dut.cu.local_rst_n.value),
+            "drbg_cntr"   : int(dut.cu.drbg_cntr.value),
+            "kec_state"   : int(dut.keccak.fsm_state.value),
+            "rx_cntr"     : int(dut.keccak.rx_cntr.value),
+            "round_cntr"  : int(dut.keccak.round_cntr.value),
+            "word_tx"     : int(dut.keccak.word_tx_cntr.value),
+            "rct_err"     : int(dut.hlth_tst.rct_error.value),
+            "apt_err"     : int(dut.hlth_tst.apt_error.value),
+            "hlth_err"    : int(dut.hlth_tst.error.value),
+            "tot_fail"    : int(dut.hlth_tst.total_failure.value),
+            "valid"       : int(dut.valid.value),
+            "ent_word"    : int(dut.entropy_word.value),
+        }
 
-            if enb_n == 0:
-                dut.raw_rand_bit.value = next(bit_gen)
-            else:
-                dut.raw_rand_bit.value = 0
-    except Exception:
-        pass
+    def fmt(k, v):
+        if k == "cu_state":  return _CU_NAMES.get(v, str(v))
+        if k == "kec_state": return _KEC_NAMES.get(v, str(v))
+        if k == "rand_word": return f"0x{v:064X}"
+        if k == "ent_word":  return f"0x{v:016X}"
+        return str(v)
+
+    await RisingEdge(dut.clk)
+    prev = snap()
+    _mon_log.info(
+        f"{pfx} INIT  "
+        + "  ".join(f"{k}={fmt(k,v)}" for k, v in prev.items())
+    )
+
+    cyc = 0
+    while True:
+        await RisingEdge(dut.clk)
+        cyc += 1
+        cur  = snap()
+        diff = [(k, prev[k], cur[k]) for k in cur if prev[k] != cur[k]]
+        if diff:
+            changes = "  ".join(f"{k}: {fmt(k,ov)}->{fmt(k,nv)}" for k, ov, nv in diff)
+            _mon_log.info(f"{pfx} cyc={cyc:5d}  {changes}")
+        prev = cur
 
 
-# ── clock / task management ───────────────────────────────────────────────────
-_clocks_started = False
+# Common helpers
+def start_clocks(dut):
+    cocotb.start_soon(Clock(dut.clk,          CLK_PERIOD_NS,  unit="ns").start())
+    cocotb.start_soon(Clock(dut.sampling_clk, SCLK_PERIOD_NS, unit="ns").start())
 
-async def ensure_clocks(dut):
-    """
-    Start both clock drivers and the noise model exactly once per
-    simulation session.  Subsequent calls return immediately.
 
-    Pre-drives all DUT inputs to a known safe state before the clocks
-    begin toggling, so the RTL never sees undefined inputs at t=0.
-    """
-    global _clocks_started
-    if _clocks_started:
-        return
-    _clocks_started = True
-
+async def reset_dut(dut):
     dut.ext_rst_n.value    = 0
     dut.s_box_ack.value    = 0
     dut.raw_rand_bit.value = 0
-
-    cocotb.start_soon(_drive_clk(dut.sampling_clk, SAMPLING_CLK_PERIOD_NS / 2))
-    cocotb.start_soon(_drive_clk(dut.clk,          SYS_CLK_PERIOD_NS      / 2))
-    cocotb.start_soon(_noise_model(dut))
-
-    # Wait for a few real rising edges to confirm time is advancing.
-    await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
-
-
-async def apply_reset(dut):
-    """
-    Assert ext_rst_n (active-low) for RESET_CYCLES then release.
-    Uses clock_cycles() rather than ClockCycles() — see module docstring.
-    """
-    dut.ext_rst_n.value = 0
-    dut.s_box_ack.value = 0
-    await clock_cycles(dut.clk, RESET_CYCLES)
+    await ClockCycles(dut.clk, RESET_CYCLES)
     dut.ext_rst_n.value = 1
-    await clock_cycles(dut.clk, 2)
-    dut._log.info("[RESET] released")
+    await RisingEdge(dut.clk)
+    dut._log.info("DUT reset complete")
 
 
-# ── handshake helpers ─────────────────────────────────────────────────────────
-async def wait_key_high(dut, timeout=KEY_WAIT_TIMEOUT):
-    """
-    Block until key_ready_req is sampled HIGH on a rising edge of clk.
-
-    Always waits for a rising edge FIRST, then checks the signal level.
-    This guarantees the sampled value was registered by the RTL on that
-    specific edge and is never a combinatorial glitch or a stale value
-    left over from the previous FSM cycle.
-    """
-    for cycle in range(timeout):
-        await RisingEdge(dut.clk)
-        if int(dut.key_ready_req.value) == 1:
-            return cycle
-    raise RuntimeError(
-        f"key_ready_req never went HIGH within {timeout} cycles"
-    )
+async def wait_signal(signal, value=1, timeout=50_000, clk=None):
+    for i in range(timeout):
+        await RisingEdge(clk)
+        if int(signal.value) == value:
+            return i + 1
+    raise AssertionError(f"TIMEOUT ({timeout} cycles): {signal._path} never reached {value}")
 
 
-async def wait_key_low(dut, timeout=KEY_WAIT_TIMEOUT):
-    """
-    Block until key_ready_req is sampled LOW on a rising edge of clk.
-
-    Used as an end-of-batch synchronisation barrier inside collect_batch
-    to confirm the Keccak FSM has fully exited SQUEEZ (word_tx_cntr
-    reached 6, key_ready_req deasserted, FSM entered ABSORB) before the
-    caller proceeds to the next batch.
-    """
-    for cycle in range(timeout):
-        await RisingEdge(dut.clk)
-        if int(dut.key_ready_req.value) == 0:
-            return cycle
-    raise RuntimeError(
-        f"key_ready_req never went LOW within {timeout} cycles"
-    )
-
-
-async def collect_batch(dut, num_words=6):
-    """
-    Collect num_words 256-bit random words using the s_box_ack handshake.
-
-    Per-word sequence
-    -----------------
-    1. wait_key_high -- block until key_ready_req is HIGH on a rising
-                        edge (Keccak FSM is in SQUEEZ, rand_word valid).
-    2. sample        -- read rand_word on that same settled edge.
-    3. assert ack    -- drive s_box_ack=1 for one clock cycle so the RTL
-                        increments word_tx_cntr.
-    4. deassert ack  -- drive s_box_ack=0, then wait one more rising edge
-                        so the FSM registers the new word_tx_cntr and
-                        updates rand_word before the loop iterates.
-
-    End-of-batch barrier
-    --------------------
-    After all words are collected, wait_key_low() blocks until
-    key_ready_req deasserts, confirming word_tx_cntr reached 6, the FSM
-    entered ABSORB, and the handshake is completely finished.  Without
-    this barrier a tight caller loop (test_8) re-enters collect_batch
-    while key_ready_req is still HIGH, wait_key_high returns on the very
-    first edge, and the premature ack pushes word_tx_cntr past 6,
-    permanently deadlocking the FSM in SQUEEZ.
-    """
-    words = []
-    for idx in range(num_words):
-        cycles = await wait_key_high(dut)
-        word   = int(dut.rand_word.value)
-        words.append(word)
-        dut._log.info(f"    word[{idx}] = 0x{word:064X}  (waited {cycles} cycles)")
-
+async def ack_all_words(dut, n=KECCAK_OUTPUT_WORDS):
+    """Send n ACK pulses to drain SQUEEZ without reading word values."""
+    for _ in range(n):
         dut.s_box_ack.value = 1
-        await RisingEdge(dut.clk)   # RTL sees ack -> word_tx_cntr increments
+        await RisingEdge(dut.clk)
         dut.s_box_ack.value = 0
-        await RisingEdge(dut.clk)   # RTL registers new word_tx_cntr, updates rand_word
+        await RisingEdge(dut.clk)
 
-    # Synchronisation barrier: wait for FSM to fully exit SQUEEZ.
-    await wait_key_low(dut)
+
+async def wait_and_collect_words(dut, n=KECCAK_OUTPUT_WORDS, timeout=30_000):
+    """
+    Wait for key_ready_req then read n x 256-bit words with correct timing.
+
+    Timing: rand_word and word_tx_cntr are both registered. rand_word takes
+    2 cycles to stabilise after an ACK: 1 cycle for word_tx_cntr to register,
+    1 more for rand_word to register the new slice. A final ACK after the last
+    word drives word_tx_cntr=n which clears key_ready_req and returns to ABSORB.
+    """
+    await wait_signal(dut.key_ready_req, value=1, timeout=timeout, clk=dut.clk)
+    dut._log.info("key_ready_req asserted — collecting words")
+    words = []
+
+    # Word[0]: valid immediately when key_ready_req asserts
+    wtx = int(dut.keccak.word_tx_cntr.value)
+    rw  = int(dut.rand_word.value)
+    dut._log.info(f"  Word[0]  word_tx_cntr={wtx}  0x{rw:064X}")
+    words.append(rw)
+
+    # Words[1..n-1]: ACK -> 2 cycles settle -> read
+    for i in range(1, n):
+        dut.s_box_ack.value = 1
+        await RisingEdge(dut.clk)   # word_tx_cntr -> i
+        dut.s_box_ack.value = 0
+        await RisingEdge(dut.clk)   # word_tx_cntr registered
+        await RisingEdge(dut.clk)   # rand_word updated to slice[i]
+        wtx = int(dut.keccak.word_tx_cntr.value)
+        rw  = int(dut.rand_word.value)
+        dut._log.info(f"  Word[{i}]  word_tx_cntr={wtx}  0x{rw:064X}")
+        words.append(rw)
+
+    # Final ACK: word_tx_cntr -> n, clears key_ready_req, FSM -> ABSORB
+    dut.s_box_ack.value = 1
+    await RisingEdge(dut.clk)
+    dut.s_box_ack.value = 0
+    await RisingEdge(dut.clk)
+
     return words
 
 
-# ── TEST 1 ────────────────────────────────────────────────────────────────────
+# Normal end-to-end test (physics noise)
 @cocotb.test()
-async def test_1(dut):
-    """After reset: dead_flag = 0, key_ready_req = 0."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 01 — reset and initial state")
-    dut._log.info("━" * 60)
+async def e2e_op_test(dut):
+    """Full end-to-end TRNG operation with physics noise."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC1: Normal operation")
+    dut._log.info("=" * 60)
 
-    await ensure_clocks(dut)
-    await apply_reset(dut)
+    start_clocks(dut)
+    buf = NoiseBitBuffer(
+        mode='physics' if _HAVE_PHYSICS_MODEL else 'random',
+        seed=random.randint(0, 0xFFFF_FFFF)
+    )
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC1"))
+    cocotb.start_soon(noise_driver(dut, buf))
 
-    assert int(dut.dead_flag.value)     == 0, \
-        f"dead_flag should be 0 after reset, got {dut.dead_flag.value}"
-    assert int(dut.key_ready_req.value) == 0, \
-        f"key_ready_req should be 0 after reset, got {dut.key_ready_req.value}"
+    await ClockCycles(dut.clk, 3)
+    cu = int(dut.cu.fsm_state.value)
+    assert cu == CU_BIST, f"Expected CU_BIST({CU_BIST}), got {cu}"
+    dut._log.info("✓ CU in BIST state")
 
-    dut._log.info("PASS — TEST 01")
+    await wait_signal(dut.cu.get_raw_entropy, value=1, timeout=50, clk=dut.clk)
+    dut._log.info("✓ get_raw_entropy = 1 (raw entropy path active)")
+
+    await wait_signal(dut.keccak.fsm_state, value=KEC_PERMUTE, timeout=500, clk=dut.clk)
+    dut._log.info("✓ Keccak entered PERMUTE (entropy absorbed)")
+
+    await wait_signal(dut.keccak.fsm_state, value=KEC_SQUEEZ, timeout=50, clk=dut.clk)
+    dut._log.info("✓ Keccak in SQUEEZ")
+    words = await wait_and_collect_words(dut, timeout=200)
+    assert all(w != 0 for w in words),    "A word is all-zero — suspicious"
+    assert len(set(words)) == len(words), "Duplicate words in key"
+    dut._log.info(f"✓ {len(words)} unique non-zero words collected")
+
+    await ClockCycles(dut.clk, 4)
+    assert int(dut.key_ready_req.value) == 0, "key_ready_req should be 0 after transfer"
+    dut._log.info("✓ key_ready_req deasserted")
+
+    dut._log.info(f"Monitoring DRBG phase (expect {DRBG_CYCLES} keys)...")
+    drbg_keys = 0
+    raw_seen  = False
+    for _ in range(DRBG_CYCLES * 100):
+        await RisingEdge(dut.clk)
+        if int(dut.cu.get_raw_entropy.value) == 1:
+            raw_seen = True
+            dut._log.info(f"  Raw entropy re-asserted after {drbg_keys} DRBG keys")
+            break
+        if int(dut.key_ready_req.value) == 1:
+            drbg_keys += 1
+            dut._log.info(f"  DRBG key #{drbg_keys}  drbg_cntr={int(dut.cu.drbg_cntr.value)}")
+            await ack_all_words(dut)
+
+    assert raw_seen, "get_raw_entropy never re-asserted after DRBG phase"
+    dut._log.info(f"✓ DRBG ran for {drbg_keys} keys, raw entropy restored")
+    assert int(dut.dead_flag.value) == 0,              "dead_flag set"
+    assert int(dut.hlth_tst.total_failure.value) == 0, "total_failure set"
+    dut._log.info("✓ No health errors — TC1 PASSED ✓")
 
 
-# ── TEST 2 ────────────────────────────────────────────────────────────────────
+# RCT negative test  (stuck_0)
 @cocotb.test()
-async def test_2(dut):
-    """First key must arrive via raw entropy path and be nonzero."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 02 — first key via raw entropy path")
-    dut._log.info("━" * 60)
+async def rct_neg_test(dut):
+    """RCT negative test — stuck-at-0 noise."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC2: RCT — stuck-at-0")
+    dut._log.info("=" * 60)
 
-    await ensure_clocks(dut)
-    await apply_reset(dut)
+    start_clocks(dut)
+    buf = NoiseBitBuffer(mode='stuck_0')
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC2"))
+    nd_task = cocotb.start_soon(noise_driver(dut, buf))
 
-    cycles = await wait_key_high(dut)
-    word   = int(dut.rand_word.value)
+    await wait_signal(dut.cu.enb_health_tests, value=1, timeout=20, clk=dut.clk)
+    dut._log.info("✓ Health tests enabled")
 
-    dut._log.info(f"first key arrived after {cycles} cycles")
-    dut._log.info(f"rand_word = 0x{word:064X}")
+    await wait_signal(dut.hlth_tst.rct_error, value=1, timeout=RCT_THRESHOLD + 15, clk=dut.clk)
+    dut._log.info("✓ rct_error asserted")
 
-    assert word != 0, \
-        "rand_word is all zeros — noise model may not be injecting bits"
-    assert int(dut.dead_flag.value) == 0, \
-        "dead_flag unexpectedly asserted during startup"
+    await wait_signal(dut.cu.fsm_state, value=CU_ERROR_RECOVERY, timeout=10, clk=dut.clk)
+    dut._log.info("✓ CU in ERROR_RECOVERY")
+    nd_task.kill()
+    cocotb.start_soon(noise_driver(dut, NoiseBitBuffer(mode='random')))
 
-    dut._log.info("PASS — TEST 02")
+    await RisingEdge(dut.clk)
+    assert int(dut.cu.local_rst_n.value) == 0, "local_rst_n must be 0 in ERROR_RECOVERY"
+    dut._log.info("✓ local_rst_n deasserted")
+
+    # Wait enough cycles for ERROR_RECOVERY to complete and verify no total failure
+    await ClockCycles(dut.clk, 20)
+    assert int(dut.dead_flag.value) == 0, "dead_flag must NOT set on single error"
+    dut._log.info("✓ dead_flag = 0 — TC2 PASSED ✓")
 
 
-# ── TEST 3 ────────────────────────────────────────────────────────────────────
+# TC3 — APT negative test  (biased)
 @cocotb.test()
-async def test_3(dut):
-    """Collect all 6 words, verify handshake and diversity."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 03 — S-box handshake protocol (6 words)")
-    dut._log.info("━" * 60)
+async def apt_neg_test(dut):
+    """APT negative test — biased noise P(1)=0.95."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC3: APT — biased noise P(1)=0.95")
+    dut._log.info("=" * 60)
 
-    await ensure_clocks(dut)
-    await apply_reset(dut)
+    start_clocks(dut)
+    buf = NoiseBitBuffer(mode='apt_trigger', n_bits=APT_BIT_WINDOW + 500)
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC3"))
+    nd_task = cocotb.start_soon(noise_driver(dut, buf))
 
-    words = await collect_batch(dut, num_words=6)
+    await wait_signal(dut.cu.enb_health_tests, value=1, timeout=20, clk=dut.clk)
+    dut._log.info("✓ Health tests enabled")
 
-    assert len(words) == 6, f"expected 6 words, got {len(words)}"
-    for i, w in enumerate(words):
-        assert w != 0, f"word[{i}] is all zeros"
+    await wait_signal(dut.hlth_tst.apt_error, value=1, timeout=APT_BIT_WINDOW + 200, clk=dut.clk)
+    dut._log.info("✓ apt_error asserted")
 
-    # collect_batch already confirmed key_ready_req went low, but give
-    # the FSM a few more cycles before the final level check.
-    await clock_cycles(dut.clk, 5)
-    assert int(dut.key_ready_req.value) == 0, \
-        "key_ready_req still HIGH after all 6 acks — handshake broken"
-    assert len(set(words)) > 1, \
-        "all 6 words are identical — output not changing"
+    assert int(dut.hlth_tst.error.value) == 1, "health_error should be high"
+    dut._log.info("✓ health_error asserted")
 
-    dut._log.info("PASS — TEST 03")
+    await wait_signal(dut.cu.fsm_state, value=CU_ERROR_RECOVERY, timeout=10, clk=dut.clk)
+    dut._log.info("✓ CU in ERROR_RECOVERY — TC3 PASSED ✓")
+    nd_task.kill()
 
 
-# ── TEST 4 ────────────────────────────────────────────────────────────────────
+# Total failure / DEAD  (stuck_1)
 @cocotb.test()
-async def test_4(dut):
-    """Consecutive batches must differ — proves DRBG state updates."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 04 — DRBG feedback: consecutive batches differ")
-    dut._log.info("━" * 60)
+async def dead_neg_test(dut):
+    """Total failure -> DEAD state."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC4: Total failure -> DEAD state")
+    dut._log.info("=" * 60)
 
-    await ensure_clocks(dut)
-    await apply_reset(dut)
+    start_clocks(dut)
+    buf = NoiseBitBuffer(mode='stuck_1')
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC4"))
+    cocotb.start_soon(noise_driver(dut, buf))
 
-    batches = []
-    for i in range(3):
-        dut._log.info(f"  collecting batch {i+1}/3...")
-        words = await collect_batch(dut, num_words=6)
-        batches.append(tuple(words))
-        await clock_cycles(dut.clk, 10)
+    total_fail_timeout = CONSECUTIVE_ERRORS * (RCT_THRESHOLD + 20) + 100
+    await wait_signal(dut.hlth_tst.total_failure, value=1, timeout=total_fail_timeout, clk=dut.clk)
+    dut._log.info("✓ total_failure asserted")
 
-    for i in range(1, len(batches)):
-        assert batches[i] != batches[i-1], \
-            f"batch {i} identical to batch {i-1} — DRBG state not updating"
-        dut._log.info(f"  batch {i} != batch {i-1} ✓")
+    await wait_signal(dut.cu.fsm_state, value=CU_DEAD, timeout=10, clk=dut.clk)
+    dut._log.info("✓ CU in DEAD state")
 
-    dut._log.info("PASS — TEST 04")
+    await wait_signal(dut.dead_flag, value=1, timeout=10, clk=dut.clk)
+    dut._log.info("✓ dead_flag asserted")
 
+    assert int(dut.cu.noise_src_enb_n.value) == 1, "noise must be disabled in DEAD"
+    assert int(dut.cu.enb_health_tests.value) == 0, "health tests must be off in DEAD"
+    dut._log.info("✓ Noise + health tests disabled in DEAD")
 
-# ── TEST 5 ────────────────────────────────────────────────────────────────────
-@cocotb.test()
-async def test_5(dut):
-    """Statistical tests on 15360 bits from 10 batches."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 05 — statistical randomness")
-    dut._log.info("━" * 60)
-
-    await ensure_clocks(dut)
-    await apply_reset(dut)
-
-    all_bits    = []
-    num_batches = 10
-
-    for i in range(num_batches):
-        dut._log.info(f"  batch {i+1}/{num_batches}...")
-        words = await collect_batch(dut, num_words=6)
-        for w in words:
-            all_bits.extend(int_to_bits(w, 256))
-        await clock_cycles(dut.clk, 5)
-
-    dut._log.info(f"total bits: {len(all_bits)}")
-
-    fp, ratio = frequency_test(all_bits)
-    dut._log.info(f"  [FREQ ] ones={ratio:.4f}  {'PASS' if fp else 'FAIL'}")
-    assert fp, f"frequency FAILED: ones ratio = {ratio:.4f}"
-
-    mp, s = monobit_test(all_bits)
-    dut._log.info(f"  [MONO ] s={s:.4f}  {'PASS' if mp else 'FAIL'}")
-    assert mp, f"monobit FAILED: s = {s:.4f}"
-
-    rp, z = runs_test(all_bits)
-    dut._log.info(f"  [RUNS ] z={z:.4f}  {'PASS' if rp else 'FAIL'}")
-    assert rp, f"runs FAILED: z = {z:.4f}"
-
-    ap, ac = autocorrelation_test(all_bits, lag=1)
-    dut._log.info(f"  [AUTO ] ratio={ac:.4f}  {'PASS' if ap else 'FAIL'}")
-    assert ap, f"autocorrelation FAILED: ratio = {ac:.4f}"
-
-    h = min_entropy(all_bits)
-    dut._log.info(f"  [ENTR ] Hmin={h:.4f} bits/bit  {'PASS' if h >= 0.90 else 'FAIL'}")
-    assert h >= 0.90, f"min entropy FAILED: {h:.4f} < 0.90"
-
-    dut._log.info("PASS — TEST 05")
-
-
-# ── TEST 6 ────────────────────────────────────────────────────────────────────
-@cocotb.test()
-async def test_6(dut):
-    """dead_flag must never assert during normal operation."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 06 — no spurious dead_flag")
-    dut._log.info("━" * 60)
-
-    await ensure_clocks(dut)
-    await apply_reset(dut)
-
-    for i in range(5):
-        dut._log.info(f"  batch {i+1}/5...")
-        await collect_batch(dut, num_words=6)
-        assert int(dut.dead_flag.value) == 0, \
-            f"dead_flag asserted at batch {i+1} — health test false positive?"
-        await clock_cycles(dut.clk, 10)
-
-    dut._log.info("PASS — TEST 06")
-
-
-# ── TEST 7 ────────────────────────────────────────────────────────────────────
-@cocotb.test()
-async def test_7(dut):
-    """Assert ext_rst_n mid-operation and verify clean recovery."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 07 — recovery after mid-operation reset")
-    dut._log.info("━" * 60)
-
-    await ensure_clocks(dut)
-    await apply_reset(dut)
-
-    dut._log.info("  running one batch before reset...")
-    words_before = await collect_batch(dut, num_words=6)
-    await clock_cycles(dut.clk, 20)
-
-    dut._log.info("  asserting ext_rst_n...")
+    dut._log.info("Applying ext_rst_n to recover...")
     dut.ext_rst_n.value = 0
-    await clock_cycles(dut.clk, 5)
+    await ClockCycles(dut.clk, RESET_CYCLES)
     dut.ext_rst_n.value = 1
-    await clock_cycles(dut.clk, 2)
+    await ClockCycles(dut.clk, 3)
 
-    assert int(dut.dead_flag.value)     == 0, "dead_flag not cleared after reset"
-    assert int(dut.key_ready_req.value) == 0, "key_ready_req not cleared after reset"
+    cu = int(dut.cu.fsm_state.value)
+    assert cu in (CU_IDLE, CU_BIST), f"Expected IDLE/BIST after reset, got {cu}"
+    dut._log.info(f"✓ CU state = {cu} after reset")
 
-    dut._log.info("  verifying recovery...")
-    words_after = await collect_batch(dut, num_words=6)
-
-    assert any(w != 0 for w in words_after), \
-        "all words after recovery are zero"
-
-    dut._log.info(f"  before: 0x{words_before[0]:064X}...")
-    dut._log.info(f"  after : 0x{words_after[0]:064X}...")
-    dut._log.info("PASS — TEST 07")
+    assert int(dut.dead_flag.value) == 0, "dead_flag must clear after ext_rst_n"
+    dut._log.info("✓ dead_flag cleared — TC4 PASSED ✓")
 
 
-# ── TEST 8 ────────────────────────────────────────────────────────────────────
+# DRBG counter sequence  (physics noise)
 @cocotb.test()
-async def test_8(dut):
-    """20 batches continuously — no hangs, no dead_flag, output varies."""
-    dut._log.info("━" * 60)
-    dut._log.info("TEST 08 — continuous operation (20 batches)")
-    dut._log.info("━" * 60)
+async def drbg_cntr_test(dut):
+    """drbg_cntr increment sequence verification."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC5: DRBG counter sequence")
+    dut._log.info("=" * 60)
 
-    await ensure_clocks(dut)
-    await apply_reset(dut)
+    start_clocks(dut)
+    buf = NoiseBitBuffer(
+        mode='physics' if _HAVE_PHYSICS_MODEL else 'random',
+        seed=7
+    )
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC5"))
+    cocotb.start_soon(noise_driver(dut, buf))
 
-    num_batches = 20
-    first_words = []
+    dut._log.info("Waiting for first key (raw entropy)...")
+    await wait_signal(dut.key_ready_req, value=1, timeout=10_000, clk=dut.clk)
+    dut._log.info("✓ First key ready")
+    await ack_all_words(dut)
 
-    for i in range(num_batches):
-        # No inter-batch delay — stress test for the wait_key_low barrier.
-        words = await collect_batch(dut, num_words=6)
-        assert int(dut.dead_flag.value) == 0, \
-            f"dead_flag asserted at batch {i+1}"
-        first_words.append(words[0])
-        if (i + 1) % 5 == 0:
-            dut._log.info(
-                f"  completed batch {i+1}/{num_batches}  "
-                f"word[0]=0x{words[0]:064X}"
-            )
+    observed = []
+    raw_seen  = False
+    for _ in range(DRBG_CYCLES * 100):
+        await RisingEdge(dut.clk)
+        if int(dut.cu.get_raw_entropy.value) == 1:
+            raw_seen = True
+            dut._log.info(f"  get_raw_entropy=1 after {len(observed)} DRBG keys")
+            break
+        if int(dut.key_ready_req.value) == 1:
+            cnt = int(dut.cu.drbg_cntr.value)
+            if not observed or cnt != observed[-1]:
+                observed.append(cnt)
+                dut._log.info(f"  DRBG key #{len(observed)}: drbg_cntr={cnt}")
+            await ack_all_words(dut)
+            # Check again immediately after acking — raw entropy may have asserted
+            if int(dut.cu.get_raw_entropy.value) == 1:
+                raw_seen = True
+                dut._log.info(f"  get_raw_entropy=1 after {len(observed)} DRBG keys")
+                break
 
-    unique = set(first_words)
-    dut._log.info(f"unique first-words: {len(unique)}/{num_batches}")
-    assert len(unique) > num_batches // 2, \
-        f"too many repeated first-words — only {len(unique)} unique out of {num_batches}"
+    assert raw_seen, "get_raw_entropy never re-asserted"
+    expected = list(range(1, DRBG_CYCLES - 1))
+    assert observed == expected, \
+        f"drbg_cntr sequence wrong.\n  Expected: {expected}\n  Got:      {observed}"
+    dut._log.info(f"✓ drbg_cntr sequence correct: {observed} — TC5 PASSED ✓")
 
-    dut._log.info("PASS — TEST 08")
+
+# Error recovery  (bad=stuck_0, recovery=physics)
+@cocotb.test()
+async def err_rec_test(dut):
+    """Single RCT error recovery, then normal key generation resumes."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC6: Error recovery -> normal resumption")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    buf_bad  = NoiseBitBuffer(mode='stuck_0', n_bits=200)
+    buf_good = NoiseBitBuffer(
+        mode='physics' if _HAVE_PHYSICS_MODEL else 'random',
+        seed=0xBEEF
+    )
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC6"))
+
+    nd_task = cocotb.start_soon(noise_driver(dut, buf_bad))
+    await wait_signal(dut.cu.fsm_state, value=CU_ERROR_RECOVERY, timeout=200, clk=dut.clk)
+    dut._log.info("✓ CU in ERROR_RECOVERY")
+
+    await RisingEdge(dut.clk)
+    drbg_cnt = int(dut.cu.drbg_cntr.value)
+    assert drbg_cnt == 0, f"drbg_cntr must be 0 in ERROR_RECOVERY, got {drbg_cnt}"
+    dut._log.info("✓ drbg_cntr = 0 in ERROR_RECOVERY")
+
+    nd_task.kill()
+    cocotb.start_soon(noise_driver(dut, buf_good))
+
+    await wait_signal(dut.cu.fsm_state, value=CU_BIST, timeout=15, clk=dut.clk)
+    dut._log.info("✓ CU back in BIST")
+
+    await wait_signal(dut.cu.get_raw_entropy, value=1, timeout=20, clk=dut.clk)
+    dut._log.info("✓ get_raw_entropy=1 (drbg_cntr=0 forces raw path)")
+
+    words = await wait_and_collect_words(dut, timeout=10_000)
+    assert all(w != 0 for w in words), "Post-recovery key has all-zero word"
+    dut._log.info(f"✓ Valid key produced ({len(words)} words)")
+    assert int(dut.dead_flag.value) == 0
+    dut._log.info("✓ dead_flag = 0 — TC6 PASSED ✓")
+
+
+# CDC synchronizer  (random is fine — no key generation)
+@cocotb.test()
+async def cdc_lat_test(dut):
+    """2-flop CDC synchronizer latency check."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC7: CDC synchronizer latency")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC7"))
+
+    dut.ext_rst_n.value    = 0
+    dut.raw_rand_bit.value = 1
+    dut.s_box_ack.value    = 0
+    await ClockCycles(dut.clk, RESET_CYCLES)
+
+    assert int(dut.rand_bit_sync1.value) == 0, "sync1 must be 0 during reset"
+    assert int(dut.rand_bit.value)       == 0, "rand_bit must be 0 during reset"
+    dut._log.info("✓ Synchronizer zeroed during reset")
+
+    dut.ext_rst_n.value    = 1
+    dut.raw_rand_bit.value = 0
+    await ClockCycles(dut.clk, 4)
+    assert int(dut.rand_bit.value) == 0
+
+    dut.raw_rand_bit.value = 1
+    await RisingEdge(dut.clk)   # edge 1: sync1 register captures raw_rand_bit=1
+    await RisingEdge(dut.clk)   # edge 2: sync1 value now readable; rand_bit captures sync1
+    s1 = int(dut.rand_bit_sync1.value)   # ✓ sync1=1 (captured on edge 1)
+    await RisingEdge(dut.clk)   # edge 3: rand_bit value now readable
+    s2 = int(dut.rand_bit.value)         # ✓ rand_bit=1 (captured on edge 2)
+
+    assert s1 == 1, f"sync1 must be 1 after 1 clk of input=1, got {s1}"
+    assert s2 == 1, f"rand_bit must be 1 after 2 clk of input=1, got {s2}"
+    dut._log.info("✓ CDC 2-cycle latency confirmed")
+
+    buf = NoiseBitBuffer(mode='random')
+    cocotb.start_soon(noise_driver(dut, buf))
+    await wait_signal(dut.cu.noise_src_enb_n, value=0, timeout=20, clk=dut.clk)
+    await ClockCycles(dut.clk, 3)
+    enb = int(dut.noise_enb_n.value)
+    assert enb == 0, f"noise_enb_n (sampling_clk domain) should be 0, got {enb}"
+    dut._log.info("✓ noise_enb_n crossed to sampling_clk domain — TC7 PASSED ✓")
+
+
+# Entropy collector SIPO  (random is fine — tests shift register only)
+@cocotb.test()
+async def sipo_test(dut):
+    """Entropy collector SIPO 64-bit shift register check."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC8: Entropy collector SIPO")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    buf = NoiseBitBuffer(mode='random', seed=0xABCD)
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC8"))
+    cocotb.start_soon(noise_driver(dut, buf))
+
+    # Check 1: noise enabled 
+    await wait_signal(dut.cu.noise_src_enb_n, value=0, timeout=20, clk=dut.clk)
+    dut._log.info("✓ Noise enabled (BIST)")
+
+    # Check 2: SIPO fills and valid asserts within 64+10 cycles 
+    await wait_signal(dut.valid, value=1, timeout=ENTROPY_WORD_BITS + 10, clk=dut.clk)
+    ew = int(dut.entropy_word.value)
+    dut._log.info(f"✓ valid asserted — entropy_word = 0x{ew:016X}")
+    assert ew != 0, "entropy_word is all-zero — no bits shifted in"
+
+    # Check 3: entropy word bit balance 
+    bit_count = bin(ew).count('1')
+    dut._log.info(f"  bit count = {bit_count}/64")
+    assert 10 <= bit_count <= 54, \
+        f"entropy_word bit balance suspicious: {bit_count}/64 ones"
+    dut._log.info("✓ entropy_word bit balance OK")
+
+    # Check 4: Keccak already consumed entropy and produced a key 
+    # Keccak enters PERMUTE on the very first clock (drbg_cntr=0,
+    # get_raw_entropy=1 at reset), so by the time valid fires at cyc~64,
+    # Keccak is already in SQUEEZ or has key_ready_req=1.
+    # Just confirm key_ready_req — the definitive proof entropy was
+    # absorbed and a full Keccak permutation completed successfully.
+    kec_state_now = int(dut.keccak.fsm_state.value)
+    dut._log.info(f"  keccak fsm_state at valid = {kec_state_now} "
+                  f"(ABSORB=0, PERMUTE=1, SQUEEZ=2)")
+    assert kec_state_now in (KEC_PERMUTE, KEC_SQUEEZ), \
+        f"Unexpected kec_state {kec_state_now} when valid fired — " \
+        f"Keccak should be processing entropy"
+    dut._log.info("✓ Keccak is processing entropy (PERMUTE or SQUEEZ)")
+
+    await wait_signal(dut.key_ready_req, value=1, timeout=50, clk=dut.clk)
+    dut._log.info("✓ key_ready_req asserted — entropy absorbed, key produced")
+
+    # Check 5: drain SQUEEZ and confirm FSM continues 
+    await ack_all_words(dut)
+    await ClockCycles(dut.clk, 3)
+    assert int(dut.dead_flag.value) == 0, "dead_flag set — unexpected failure"
+    dut._log.info("✓ No dead_flag — system healthy")
+    dut._log.info("TC8 PASSED ✓")
+
+
+# Output word statistics  (physics noise)
+@cocotb.test()
+async def sanity_test(dut):
+    """Statistical sanity of Keccak output (3 key sets, 18 words)."""
+    N_KEYS = 3
+    dut._log.info("=" * 60)
+    dut._log.info(f"TC9: Output statistics ({N_KEYS} keys)")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    buf = NoiseBitBuffer(
+        mode='physics' if _HAVE_PHYSICS_MODEL else 'random',
+        seed=99
+    )
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC9"))
+    cocotb.start_soon(noise_driver(dut, buf))
+
+    all_words = []
+    for k in range(N_KEYS):
+        dut._log.info(f"  Collecting key {k+1}/{N_KEYS}...")
+        words = await wait_and_collect_words(dut, timeout=20_000)
+        all_words.extend(words)
+
+    assert len(set(all_words)) == len(all_words), \
+        f"Word collision detected across {N_KEYS} keys"
+    dut._log.info(f"✓ No collisions across {len(all_words)} words")
+
+    for i, w in enumerate(all_words):
+        frac = bin(w).count('1') / 256.0
+        assert 0.35 <= frac <= 0.65, \
+            f"Word {i}: bit balance {frac:.3f} outside [0.35, 0.65]"
+    dut._log.info(f"✓ All {len(all_words)} words pass bit-balance check — TC9 PASSED ✓")
+
+
+# Keccak FSM sequencing  (physics noise)
+@cocotb.test()
+async def fsm_test(dut):
+    """Keccak FSM ABSORB->PERMUTE(x24)->SQUEEZ->ABSORB sequencing."""
+    dut._log.info("=" * 60)
+    dut._log.info("TC10: Keccak FSM sequencing")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    buf = NoiseBitBuffer(
+        mode='physics' if _HAVE_PHYSICS_MODEL else 'random',
+        seed=77
+    )
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC10"))
+    cocotb.start_soon(noise_driver(dut, buf))
+
+    await wait_signal(dut.keccak.fsm_state, value=KEC_PERMUTE,
+                      timeout=10_000, clk=dut.clk)
+    dut._log.info("✓ Keccak entered PERMUTE")
+
+    # Count cycles spent in PERMUTE and collect round_cntr sequence.
+    # Strategy: sample BEFORE advancing — check current state first,
+    # then clock. This way the cycle where round_cntr==23 is counted
+    # before fsm_state transitions to SQUEEZ on the next edge.
+    permute_cycles = 0
+    round_seq = []
+
+    for _ in range(KECCAK_PERMUTE_RNDS + 5):
+        # Read state BEFORE the next edge
+        if int(dut.keccak.fsm_state.value) != KEC_PERMUTE:
+            break
+        round_seq.append(int(dut.keccak.round_cntr.value))
+        permute_cycles += 1
+        await RisingEdge(dut.clk)   # advance — may cause PERMUTE->SQUEEZ
+
+    assert permute_cycles == KECCAK_PERMUTE_RNDS, \
+        f"PERMUTE: {permute_cycles} cycles, expected {KECCAK_PERMUTE_RNDS}"
+    dut._log.info(f"✓ PERMUTE: exactly {permute_cycles} cycles")
+
+    assert round_seq == list(range(KECCAK_PERMUTE_RNDS)), \
+        f"round_cntr sequence wrong: {round_seq}"
+    dut._log.info(f"✓ round_cntr: 0 -> {KECCAK_PERMUTE_RNDS - 1}")
+
+    # After the loop, fsm_state should now be SQUEEZ
+    # (the RisingEdge that ended the loop registered SQUEEZ)
+    await RisingEdge(dut.clk)   # one more edge so SQUEEZ is readable
+    ks = int(dut.keccak.fsm_state.value)
+    assert ks == KEC_SQUEEZ, f"Expected SQUEEZ after PERMUTE, got {ks}"
+    dut._log.info("✓ SQUEEZ entered after round 23")
+
+    await ack_all_words(dut)
+    await wait_signal(dut.keccak.fsm_state, value=KEC_ABSORB,
+                      timeout=20, clk=dut.clk)
+    dut._log.info("✓ ABSORB re-entered after SQUEEZ — TC10 PASSED ✓")

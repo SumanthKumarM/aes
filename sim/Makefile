@@ -7,11 +7,11 @@ PARAM_FILE = $(RTL_DIR)/ro_param_pkg.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
 $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doesn't exist
-export PYTHONPATH := $(TB_DIR):$(PYTHONPATH)
+export PYTHONPATH := $(TB_DIR):$(SIM_DIR):$(PYTHONPATH)
 
 # Cocotb setup
 TOPLEVEL = trng
-COCOTB_TEST_MODULES = trng_tb 
+COCOTB_TEST_MODULES = trng_tb
 SIM = verilator
 
 # Verilator specific flags
@@ -44,8 +44,8 @@ gen_param:
 run: $(PARAM_FILE)
 	$(MAKE) sim 2>&1 | tee sim.log
 
-.PHONY: run_test
-run_test: $(PARAM_FILE)
+.PHONY: run_tests
+run_tests: $(PARAM_FILE)
 	@echo "Running specific test: $(test)"
 	$(MAKE) sim 2>&1 | tee sim.log
 
