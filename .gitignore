@@ -4,3 +4,5 @@ sim/.cache  /
 sim/dump.vcd
 sim/results.xml
 sim/sim.log
+synth/synth.log
+synth/trng_schematic.dot

@@ -1,0 +1,26 @@
+# Load the Slang plugin
+plugin -i slang
+
+# Read the design using Slang, Slang handles the package and the arrays correctly.
+read_slang ../rtl/ro_param_pkg.sv ../rtl/trng.sv
+
+# Elaborate the design hierarchy
+hierarchy -check -top trng
+
+# netlist generation
+proc
+
+# optimization pass, removes unused logic and flattens simple structures.
+opt
+
+# final Hardware Check. specifically looks for combinational loops and wires with multiple drivers.
+check
+
+# Print resource statistics
+stat
+
+# Generate and open a schematic 
+show -colors 2 -width -signed trng
+
+# Export the schematic to a PDF file
+show -format dot -prefix trng_schematic trng

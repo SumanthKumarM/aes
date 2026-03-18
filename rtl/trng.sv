@@ -303,7 +303,7 @@ module health_tests (
     logic [1:0] err_cntr;
     logic rct_prev_bit, prev_err;
     logic [APT_CNTR_WIDTH-1 : 0] apt_window_cntr, apt_counter;
-    wire logic rct_error, apt_error;
+    wire rct_error, apt_error;
 
     // Repetetion Count Test (RCT)
     always_ff@(posedge clk) begin
@@ -329,7 +329,7 @@ module health_tests (
             apt_counter <= 0;
         end
         else begin
-            if(apt_window_cntr  ==  type(apt_window_cntr)'(APT_BIT_WINDOW-1)) begin
+            if(apt_window_cntr  ==  (APT_CNTR_WIDTH)'(APT_BIT_WINDOW-1)) begin
                 apt_counter <= (rand_bit == 1) ? 1 : 0; // if when 1024th bit is 1 then it is counted or else the registers gets reset
                 apt_window_cntr <= 0; // explicit window counter reset to keep both registers in sync
             end
@@ -340,7 +340,7 @@ module health_tests (
         end
     end
 
-    assign apt_error = (apt_counter > type(apt_counter)'(APT_THRESHOLD)) ? 1 : 0;
+    assign apt_error = (apt_counter > (APT_CNTR_WIDTH)'(APT_THRESHOLD)) ? 1 : 0;
 
     // final error output
     assign error = rct_error | apt_error;
@@ -418,7 +418,7 @@ module control_unit(
                     enb_health_tests <= 1;
 
                     // updating DRBG counter based on Keccak_ready
-                    if(drbg_cntr == type(drbg_cntr)'(DRBG_CYCLES-1)) drbg_cntr <= 0;
+                    if(drbg_cntr == (DRBG_CNTR_WIDTH)'(DRBG_CYCLES-1)) drbg_cntr <= 0;
                     else if(Keccak_ready) drbg_cntr <= drbg_cntr + 1;
                     else drbg_cntr <= drbg_cntr; 
 
