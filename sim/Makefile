@@ -96,3 +96,4 @@ clean_all: clean
 	rm -rf sim_build
 	rm -f sim.log results.xml
 	rm -rf .cache*
+	rm -rf $(SYNTH_DIR)/*.log $(SYNTH_DIR)/*.dot $(SYNTH_DIR)/*.json

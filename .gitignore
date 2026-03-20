@@ -6,3 +6,4 @@ sim/results.xml
 sim/sim.log
 synth/synth.log
 synth/trng_schematic.dot
+synth/trng.json
