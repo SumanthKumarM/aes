@@ -24,9 +24,3 @@ show -colors 2 -width -signed trng
 
 # Export the schematic to a PDF file
 show -format dot -prefix trng_schematic trng
-
-# Clean up the netlist one last time to remove "ghost" wires
-clean -purge
-
-# Export the design to JSON for NetlistsVG
-write_json trng.json
