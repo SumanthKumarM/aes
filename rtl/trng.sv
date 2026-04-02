@@ -3,7 +3,7 @@ import ro_param_pkg::*;
 typedef logic [4:0][4:0][63:0] state_t;
 
 module trng(
-    output logic [255:0] rand_word,  // 256-bit random words to S-box
+    output logic [447:0] rand_word,  // 448-bit random packet to S-box
     output logic key_ready_req,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
     input logic s_box_ack,  // S-box acknowledges receipt of random words
@@ -121,7 +121,7 @@ endmodule
 typedef enum logic [1:0] {ABSORB, PERMUTE, SQUEEZ} Keccak_states;
 
 module keccak_cond (
-    output logic [255:0] rand_word,  // 64 4-bit random words needed for S-Box()
+    output logic [447:0] rand_word,  // 112 4-bit random words needed for S-Box()
     output logic ready,  // indicates entropy collector that this block isi ready to accecpt raw entropy
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
@@ -134,7 +134,7 @@ module keccak_cond (
     logic [191:0] temp_entropy;  // to store raw entropy bits
     logic [4:0] round_cntr;  // keeps track of number of rounds
     logic [1:0] rx_cntr;  // keeps track of handshakes
-    logic [2:0] word_tx_cntr;  // keeps track of random 64-bit words that are being sent to AES_GCM
+    logic [1:0] word_tx_cntr;  // keeps track of random 448-bit packets that are being sent to AES_GCM
     Keccak_states fsm_state;  
 
     // flattening state matrix to access slices of it
@@ -273,17 +273,22 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    if(word_tx_cntr < 6 && s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
-                    else if(word_tx_cntr == 6) word_tx_cntr <= 0;
+                    if(word_tx_cntr < 3 && s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
+                    else if(word_tx_cntr == 3) word_tx_cntr <= 0;
                     else word_tx_cntr <= word_tx_cntr;
 
-                    // PISO logic to send 64-bit rand words to AES_GCM block
-                    rand_word <= (word_tx_cntr != 6) ? state_flat[(11'(word_tx_cntr) << 8) +: 256] : 0;  
+                    // PISO logic to send 448-bit random packets to AES_GCM block 
+                    case (word_tx_cntr)
+                        2'b00: rand_word <= state_flat[447:0];
+                        2'b01: rand_word <= state_flat[895:448];
+                        2'b10: rand_word <= state_flat[1343:896]; 
+                        default: rand_word <= 0;
+                    endcase
 
                     // when random key is available key_ready_req becomes high and when all data is sent it becomes low
-                    key_ready_req <= (word_tx_cntr != 6) ? 1'b1 : 0;
+                    key_ready_req <= (word_tx_cntr != 3) ? 1'b1 : 0;
                     
-                    fsm_state <= (word_tx_cntr == 6) ? ABSORB : SQUEEZ;  
+                    fsm_state <= (word_tx_cntr == 3) ? ABSORB : SQUEEZ;  
                 end
                 default: fsm_state <= ABSORB;
             endcase
@@ -412,15 +417,11 @@ module control_unit(
                 end 
                 BIST: begin
                     local_rst_n <= 1;
+                    drbg_cntr <= drbg_cntr;
 
                     // enabling blocks
                     noise_src_enb_n <= 0;
                     enb_health_tests <= 1;
-
-                    // updating DRBG counter based on Keccak_ready
-                    if(drbg_cntr == (DRBG_CNTR_WIDTH)'(DRBG_CYCLES-1)) drbg_cntr <= 0;
-                    else if(Keccak_ready) drbg_cntr <= drbg_cntr + 1;
-                    else drbg_cntr <= drbg_cntr; 
 
                     // setting get_raw_entropy, for every (DRBG_CYCLES) cycles Keccak block uses
                     // actual raw entropy or else it uses DRBG feedback path
@@ -440,9 +441,12 @@ module control_unit(
                     enb_health_tests <= enb_health_tests;
                     local_rst_n <= local_rst_n;
                     dead_flag <= dead_flag;
-                    drbg_cntr <= drbg_cntr;
                     err_state_delay <= err_state_delay;
                     get_raw_entropy <= 0;  // no entropy collection when waiting for acknowledgement
+
+                    // Increment exactly once per completed key transfer
+                    if(!Keccak_ready) drbg_cntr <= (drbg_cntr == (DRBG_CNTR_WIDTH)'(DRBG_CYCLES-1)) ? 0 : drbg_cntr + 1;
+                    else drbg_cntr <= drbg_cntr; 
 
                     // state transition
                     case({total_failure, health_error})
