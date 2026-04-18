@@ -144,105 +144,277 @@ All arithmetic is performed in **GF(2⁴)**.
 
 ---
 
-# Computing D⁻¹
-
-Since GF(2⁴) contains 16 elements:
-
-D⁻¹ = D¹⁴
-
-Exponentiation is implemented as:
-
-D¹⁴ = D⁸ · D⁴ · D²
-
-This requires:
-
-- squaring operations
-- multiplication operations
-
----
-
 # Masking Strategy
 
-To protect against **power analysis attacks**, the design uses **first-order Boolean masking**.
+To protect against **power analysis attacks**, the design uses **first-order Boolean masking**.  
+The mask is introduced **at the input**, before any nonlinear operation ever occurs.  
+Linear operations (basis transforms, squarings, affine transform) are applied independently per share.  
+Only genuine GF(2⁴) multiplications require fresh randomness from the TRNG.
 
-A value is split into two shares:
+The reason why masking is applied at the input itself is the basis transform T is a purely linear XOR network.  
+If a₁ and a₀ were masked after T, the multiplication a₁·a₀ would still occur unmasked, leaking information at that exact moment.  
+Therefore masking must be introduced **before the first multiplication**, so that D is never computed in the clear on any wire at any point.  
 
-D = D₁ ⊕ D₂
+## Input Splitting
 
-Where:
+Before any multiplication, a₁ and a₀ are split into two shares using TRNG outputs R₁ and R₂:
 
-- D₁ = masked share
-- D₂ = random mask
+```
+a₁ᵣ = R₁                  ← random mask from TRNG
+a₁ₘ = a₁ ⊕ a₁ᵣ           ← masked share (XOR only, no new R needed)
 
-Neither share individually reveals the secret value.
+a₀ᵣ = R₂                  ← random mask from TRNG
+a₀ₘ = a₀ ⊕ a₀ᵣ           ← masked share (XOR only, no new R needed)
+```
+
+At this point: a₁ₘ ⊕ a₁ᵣ = a₁  and  a₀ₘ ⊕ a₀ᵣ = a₀
 
 ---
 
-# Masked Multiplication
+# Masked Multiplication Gadget
 
-For masked operands:
+For any two masked operands A = A₁ ⊕ A₂ and B = B₁ ⊕ B₂, the product C = A·B is computed using fresh randomness R from TRNG:
 
-A = A₁ ⊕ A₂  
-B = B₁ ⊕ B₂  
+```
+C₁ = A₁·B₁ ⊕ R
+C₂ = A₁·B₂ ⊕ A₂·B₁ ⊕ A₂·B₂ ⊕ R
+```
 
-The masked product is computed as:
+Verification: C₁ ⊕ C₂ = A₁B₁ ⊕ A₁B₂ ⊕ A₂B₁ ⊕ A₂B₂ = (A₁ ⊕ A₂)(B₁ ⊕ B₂) = A·B 
 
-C₁ = A₁B₁ ⊕ R  
-C₂ = A₁B₂ ⊕ A₂B₁ ⊕ A₂B₂ ⊕ R  
-
-Where:
-
-- R is fresh randomness
-- Final value:
-
-C = C₁ ⊕ C₂
-
-The randomness cancels during recombination.
+Neither C₁ nor C₂ individually reveals A·B. R cancels upon recombination.  
 
 This is where the **True Random Number Generator (TRNG)** circuit comes into play to provide these random value.
 
 ---
-# True Random Number Generator (TRNG) for Masked AES
+
+# Computing D in Masked Form
+
+Recall: D = a₁²λ ⊕ a₁a₀ ⊕ a₀²
+
+## Squaring Terms — Linear, Split for Free
+
+In GF(2⁴), squaring is a **linear map**, so it distributes across XOR:
+
+```
+a₁² = (a₁ₘ ⊕ a₁ᵣ)² = a₁ₘ² ⊕ a₁ᵣ²     ← no R needed
+a₀² = (a₀ₘ ⊕ a₀ᵣ)² = a₀ₘ² ⊕ a₀ᵣ²     ← no R needed
+```
+
+## Multiplication Term — Apply Masked Multiplication Gadget with R₃
+
+```
+P₁ = a₁ₘ·a₀ₘ ⊕ R₃
+P₂ = a₁ₘ·a₀ᵣ ⊕ a₁ᵣ·a₀ₘ ⊕ a₁ᵣ·a₀ᵣ ⊕ R₃
+```
+
+Verification: P₁ ⊕ P₂ = (a₁ₘ ⊕ a₁ᵣ)(a₀ₘ ⊕ a₀ᵣ) = a₁·a₀ 
+
+## Assembling D₁ and D₂
+
+```
+D₁ = a₁ₘ²·λ ⊕ P₁ ⊕ a₀ₘ²
+D₂ = a₁ᵣ²·λ ⊕ P₂ ⊕ a₀ᵣ²
+```
+
+Verification:  
+D₁ ⊕ D₂ = (a₁ₘ² ⊕ a₁ᵣ²)λ ⊕ (P₁ ⊕ P₂) ⊕ (a₀ₘ² ⊕ a₀ᵣ²)  
+         = a₁²λ ⊕ a₁a₀ ⊕ a₀² = D 
+
+**D is born already in masked form. It is never computed in the clear.**
+
+---
+
+# Computing D⁻¹ in Masked Form
+
+Since GF(2⁴) has 16 elements: D⁻¹ = D¹⁴ = D⁸ · D⁴ · D²
+
+## Squarings — Purely Linear, Zero Cost
+
+Squaring each share independently:
+
+```
+D₁² , D₂²     →  shares of D²    (no R needed)
+D₁⁴ , D₂⁴     →  shares of D⁴    (no R needed)
+D₁⁸ , D₂⁸     →  shares of D⁸    (no R needed)
+```
+
+Verification for D²:  
+D₁² ⊕ D₂² = (D₁ ⊕ D₂)² = D²   (linearity of squaring in GF(2⁴))
+
+## First Masked Multiply — D⁸ · D⁴ using R₄
+
+```
+Q₁ = D₁⁸·D₁⁴ ⊕ R₄
+Q₂ = D₁⁸·D₂⁴ ⊕ D₂⁸·D₁⁴ ⊕ D₂⁸·D₂⁴ ⊕ R₄
+```
+
+Verification: Q₁ ⊕ Q₂ = (D₁⁸ ⊕ D₂⁸)(D₁⁴ ⊕ D₂⁴) = D⁸·D⁴ 
+
+## Second Masked Multiply — (D⁸·D⁴) · D² using R₅
+
+```
+E₁ = Q₁·D₁² ⊕ R₅
+E₂ = Q₁·D₂² ⊕ Q₂·D₁² ⊕ Q₂·D₂² ⊕ R₅
+```
+
+Verification: E₁ ⊕ E₂ = (Q₁ ⊕ Q₂)(D₁² ⊕ D₂²) = D⁸·D⁴·D² = D¹⁴ = D⁻¹ 
+
+---
+
+# Computing A⁻¹ in Masked Form
+
+Need: new_a₁ = D⁻¹·a₁  and  new_a₀ = D⁻¹·(a₁ ⊕ a₀)
+
+## Masked Multiply D⁻¹ · a₁ using R₆
+
+```
+F₁ = E₁·a₁ₘ ⊕ R₆
+F₂ = E₁·a₁ᵣ ⊕ E₂·a₁ₘ ⊕ E₂·a₁ᵣ ⊕ R₆
+```
+
+Verification: F₁ ⊕ F₂ = (E₁ ⊕ E₂)(a₁ₘ ⊕ a₁ᵣ) = D⁻¹·a₁ = new_a₁ 
+
+## Masked Multiply D⁻¹ · (a₁ ⊕ a₀) using R₇
+
+```
+G₁ = E₁·(a₁ₘ ⊕ a₀ₘ) ⊕ R₇
+G₂ = E₁·(a₁ᵣ ⊕ a₀ᵣ) ⊕ E₂·(a₁ₘ ⊕ a₀ₘ) ⊕ E₂·(a₁ᵣ ⊕ a₀ᵣ) ⊕ R₇
+```
+
+Verification: G₁ ⊕ G₂ = (E₁ ⊕ E₂)((a₁ₘ ⊕ a₁ᵣ) ⊕ (a₀ₘ ⊕ a₀ᵣ)) = D⁻¹·(a₁ ⊕ a₀) = new_a₀ 
+
+---
+
+# Optimized GF(2⁴) Squarer
+
+## Why a Dedicated Squarer Is Better
+
+A general GF(2⁴) multiplier applied to inp×inp requires an xTimes chain with conditional XOR logic. But squaring in GF(2⁴) is a **linear operation** — the output bits are fixed XOR combinations of input bits. This collapses to a pure wiring network with only 2 XOR gates.
+
+## Derivation for GF(2⁴) with Reduction Polynomial x⁴ + x + 1
+
+Let inp = {a3, a2, a1, a0}. Expand inp²:
+
+```
+inp² = (a3x³ + a2x² + a1x + a0)²
+     = a3²x⁶ + a2²x⁴ + a1²x² + a0²
+```
+
+In GF(2), squaring coefficients is identity (0²=0, 1²=1), so:
+
+```
+inp² = a3·x⁶ + a2·x⁴ + a1·x² + a0
+```
+
+Reduce mod (x⁴ + x + 1):
+
+```
+x⁴ ≡ x + 1       → {0011}
+x⁵ ≡ x² + x      → {0110}
+x⁶ ≡ x³ + x²     → {1100}
+```
+
+Substituting:
+
+```
+inp² = a3·(x³+x²) + a2·(x+1) + a1·x² + a0
+     = a3x³ + (a3⊕a1)x² + a2x + (a2⊕a0)
+```
+
+Collecting coefficients:
+
+```
+out[3] = a3
+out[2] = a3 ⊕ a1
+out[1] = a2
+out[0] = a2 ⊕ a0
+```
+---
+
+# Converting Back to AES Field
+
+After A⁻¹ is computed in masked share form:
+
+```
+{new_a1_share1, new_a0_share1}  →  T⁻¹  →  b_inv_share1
+{new_a1_share2, new_a0_share2}  →  T⁻¹  →  b_inv_share2
+```
+
+Since T⁻¹ is linear, it is applied independently to each share:
+
+b⁻¹ = b_inv_share1 ⊕ b_inv_share2
+
+---
+
+# Final Affine Transformation
+
+The AES S-Box output is computed as:
+
+b′ = A · b⁻¹ ⊕ c
+
+Where:
+
+- A = fixed AES affine matrix
+- c = affine constant vector {01100011}
+
+This step is linear and applied independently per share:
+
+```
+b_prime_share1 = A * b_inv_share1 ^ c    ← applied to share 1 only
+b_prime_share2 = A * b_inv_share2        ← c added once only to share 1
+```
+
+b′ = b_prime_share1 ⊕ b_prime_share2
+
+---
+
+# True Random Number Generator (TRNG) for Masked AES  
 
 **Purpose:**
 
 This project includes a hardware **True Random Number Generator (TRNG)** used to generate **fresh randomness `R`** required for masked arithmetic in the masked AES S-Box implementation.
 
-The generated random values are used as the **fresh mask input `R`** in masked multiplication operations.
-
----
+The generated random values are used as the **fresh mask input `R`** in masked multiplication operations.  
 
 # TRNG Architecture Overview
 
 The TRNG follows a classical entropy-conditioning architecture:
 
 ```
-Entropy Source
-      │
-      ▼
-XOR Mixing
-      │
-      ▼
-Sampling
-      │
-      ▼
-Health Tests
-      │
-      ▼
-Entropy Collector
-      │
-      ▼
-Keccak Conditioning
-      │
-      ▼
-Random Output Formatter
+Physical Noise (CMOS thermal/flicker jitter)
+            │
+            ▼
+  32 Ring Oscillators (13 inverters each)
+            │
+            ▼
+       XOR Mixing Tree
+            │
+            ▼
+    Sampling (D flip-flop)
+            │
+            ▼
+       Health Tests
+       ┌────┴────┐
+      RCT       APT
+       └────┬────┘
+            │
+            ▼
+  Entropy Collector (256-bit SIPO)
+            │
+            ▼
+  Keccak-f[1600] Conditioning (24 rounds)
+            │
+            ▼
+   Output Formatter (4-bit words)
+            │
+            ▼
+       R₁ … R₇ per S-box
 ```
 
-The final output is used as **random mask input `R`** for masked AES operations.
+The final output is used as **random mask input `R`** for masked AES operations.  
 
----
-
-# Entropy Source – Ring Oscillator Array
+## Entropy Source – Ring Oscillator Array
 
 Randomness originates from **physical noise sources in CMOS circuits**.
 
@@ -581,69 +753,6 @@ Random mask values (R)
 
 These random values protect masked AES operations against side-channel attacks.  
 
-# References
-
-The TRNG architecture implemented in this project is based on the following research paper:
-
-**Ring Oscillator Based True Random Number Generator with Keccak Conditioning**
-
-Sensors Journal (MDPI)
-
-Paper Link:  
-https://www.mdpi.com/1424-8220/25/5/1678
-
----
-
-# Completing the Inversion
-
-After computing D⁻¹:
-
-new_a₁ = D⁻¹ · a₁  
-new_a₀ = D⁻¹ · (a₁ ⊕ a₀)  
-
-This produces the inverse tower element:
-
-A⁻¹ = new_a₁ x + new_a₀
-
----
-
-# Converting Back to AES Field
-
-The inverted tower element is mapped back to the AES polynomial basis:
-
-b⁻¹ = T⁻¹ · {new_a₁, new_a₀}
-
-This yields the multiplicative inverse in **GF(2⁸)**.
-
----
-
-# Final Affine Transformation
-
-The AES S-Box output is computed as:
-
-b′ = A · b⁻¹ ⊕ c
-
-Where:
-
-- A = fixed AES affine matrix
-- c = affine constant vector
-
-This step is linear and safe under masking.
-
----
-
-# Security Characteristics
-
-This implementation provides:
-
-- Composite field inversion
-- First-order Boolean masking
-- No lookup tables
-- XOR + AND arithmetic only
-- Fresh randomness for nonlinear operations
-
-Linear transformations (basis change and affine transform) are applied **independently per masked share**.
-
 ---
 
 # Verification
@@ -658,3 +767,14 @@ Output: 0xED
 All **256 possible inputs** must produce identical outputs to the standard AES S-Box.
 
 ---
+
+# References
+
+**FIPS 197** — Advanced Encryption Standard (AES), NIST, 2001 (updated 2023).  
+https://doi.org/10.6028/NIST.FIPS.197-upd1
+
+**Canright, D.** — A Very Compact Rijndael S-box. Naval Postgraduate School Technical Report, 2005.
+
+**Ring Oscillator Based True Random Number Generator with Keccak Conditioning**  
+Sensors Journal (MDPI), 2025.  
+https://www.mdpi.com/1424-8220/25/5/1678
