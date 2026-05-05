@@ -39,20 +39,20 @@ $(PARAM_FILE):
 	@echo "Geberating RTL parameters..."
 	python $(SIM_DIR)/gen_param.py
 
-# Use 'make run' as your default starting point
-all: run
+# simulates all tests
+all: run_all
 
 .PHONY: gen_param
 gen_param:
 	@echo "Generating RTL parameters..."
 	python $(SIM_DIR)/gen_param.py
 
-.PHONY: run
-run: $(PARAM_FILE)
+.PHONY: run_all
+run_all: $(PARAM_FILE)
 	$(MAKE) sim 2>&1 | tee sim.log
 
-.PHONY: run_tests
-run_tests: $(PARAM_FILE)
+.PHONY: run_test
+run_test: $(PARAM_FILE)
 	@echo "Running specific test: $(test)"
 	$(MAKE) sim 2>&1 | tee sim.log
 

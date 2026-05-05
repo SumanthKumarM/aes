@@ -12,7 +12,7 @@ SCLK_PERIOD_NS      = 2
 RESET_CYCLES        = 8
 NOISE_BUF_SIZE      = 5000
 
-ENTROPY_WORD_BITS   = 112
+ENTROPY_WORD_BITS   = 64
 KECCAK_PERMUTE_RNDS = 24
 KECCAK_OUTPUT_WORDS = 3
 
@@ -20,7 +20,7 @@ RCT_THRESHOLD       = 8
 APT_BIT_WINDOW      = 1024
 APT_THRESHOLD       = 551
 CONSECUTIVE_ERRORS  = 3
-DRBG_CYCLES         = 10
+DRBG_CYCLES         = 24
 
 CU_IDLE             = 0
 CU_BIST             = 1
@@ -190,7 +190,7 @@ async def signal_monitor(dut, label=""):
     def fmt(k, v):
         if k == "cu_state":  return _CU_NAMES.get(v, str(v))
         if k == "kec_state": return _KEC_NAMES.get(v, str(v))
-        if k == "rand_word": return f"0x{v:0112X}"
+        if k == "rand_word": return f"0x{v:064X}"
         if k == "ent_word":  return f"0x{v:016X}"
         return str(v)
 
@@ -262,7 +262,7 @@ async def wait_and_collect_words(dut, n=KECCAK_OUTPUT_WORDS, timeout=30_000):
     # Word[0]: valid immediately when key_ready_req asserts
     wtx = int(dut.keccak.word_tx_cntr.value)
     rw  = int(dut.rand_word.value)
-    dut._log.info(f"  Word[0]  word_tx_cntr={wtx}  0x{rw:0112X}")
+    dut._log.info(f"  Word[0]  word_tx_cntr={wtx}  0x{rw:064X}")
     words.append(rw)
 
     # Words[1..n-1]: ACK -> 2 cycles settle -> read
@@ -274,7 +274,7 @@ async def wait_and_collect_words(dut, n=KECCAK_OUTPUT_WORDS, timeout=30_000):
         await RisingEdge(dut.clk)   # rand_word updated to slice[i]
         wtx = int(dut.keccak.word_tx_cntr.value)
         rw  = int(dut.rand_word.value)
-        dut._log.info(f"  Word[{i}]  word_tx_cntr={wtx}  0x{rw:0112X}")
+        dut._log.info(f"  Word[{i}]  word_tx_cntr={wtx}  0x{rw:064X}")
         words.append(rw)
 
     # Final ACK: word_tx_cntr -> n, clears key_ready_req, FSM -> ABSORB
@@ -346,7 +346,7 @@ async def e2e_op_test(dut):
     dut._log.info("✓ No health errors — TC1 PASSED ✓")
 
 
-# RCT negative test (stuck_0)
+# RCT negative test  (stuck_0)
 @cocotb.test()
 async def rct_neg_test(dut):
     """RCT negative test — stuck-at-0 noise."""
@@ -381,7 +381,7 @@ async def rct_neg_test(dut):
     dut._log.info("✓ dead_flag = 0 — TC2 PASSED ✓")
 
 
-# APT negative test (biased)
+# TC3 — APT negative test  (biased)
 @cocotb.test()
 async def apt_neg_test(dut):
     """APT negative test — biased noise P(1)=0.95."""
@@ -409,7 +409,7 @@ async def apt_neg_test(dut):
     nd_task.kill()
 
 
-# Total failure / DEAD (stuck_1)
+# Total failure / DEAD  (stuck_1)
 @cocotb.test()
 async def dead_neg_test(dut):
     """Total failure -> DEAD state."""
@@ -451,7 +451,7 @@ async def dead_neg_test(dut):
     dut._log.info("✓ dead_flag cleared — TC4 PASSED ✓")
 
 
-# DRBG counter sequence (physics noise)
+# DRBG counter sequence  (physics noise)
 @cocotb.test()
 async def drbg_cntr_test(dut):
     """drbg_cntr increment sequence verification."""
@@ -494,7 +494,7 @@ async def drbg_cntr_test(dut):
                 break
 
     assert raw_seen, "get_raw_entropy never re-asserted"
-    expected = list(range(1, 25))
+    expected = list(range(1, DRBG_CYCLES + 1))
     assert observed == expected, \
         f"drbg_cntr sequence wrong.\n  Expected: {expected}\n  Got:      {observed}"
     dut._log.info(f"✓ drbg_cntr sequence correct: {observed} — TC5 PASSED ✓")
@@ -641,7 +641,7 @@ async def sipo_test(dut):
     assert int(dut.dead_flag.value) == 0, "dead_flag set — unexpected failure"
     dut._log.info("✓ No dead_flag — system healthy")
     dut._log.info("TC8 PASSED ✓")
-
+    
 
 # Output word statistics  (physics noise)
 @cocotb.test()
@@ -672,7 +672,7 @@ async def sanity_test(dut):
     dut._log.info(f"✓ No collisions across {len(all_words)} words")
 
     for i, w in enumerate(all_words):
-        frac = bin(w).count('1') / 448.0
+        frac = bin(w).count('1') / 256.0
         assert 0.35 <= frac <= 0.65, \
             f"Word {i}: bit balance {frac:.3f} outside [0.35, 0.65]"
     dut._log.info(f"✓ All {len(all_words)} words pass bit-balance check — TC9 PASSED ✓")

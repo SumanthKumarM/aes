@@ -1,8 +1,5 @@
 """
-ro_noise_model.py
-=================
 Physics-grounded Ring Oscillator (RO) TRNG Noise Source Model
-==============================================================
 
 Models the TRNG noise source described in:
   "A High-Entropy True Random Number Generator with Keccak Conditioning for FPGA"
