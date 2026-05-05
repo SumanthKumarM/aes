@@ -14,13 +14,13 @@ NOISE_BUF_SIZE      = 5000
 
 ENTROPY_WORD_BITS   = 64
 KECCAK_PERMUTE_RNDS = 24
-KECCAK_OUTPUT_WORDS = 6
+KECCAK_OUTPUT_WORDS = 3
 
 RCT_THRESHOLD       = 8
 APT_BIT_WINDOW      = 1024
 APT_THRESHOLD       = 551
 CONSECUTIVE_ERRORS  = 3
-DRBG_CYCLES         = 10
+DRBG_CYCLES         = 24
 
 CU_IDLE             = 0
 CU_BIST             = 1
@@ -494,7 +494,7 @@ async def drbg_cntr_test(dut):
                 break
 
     assert raw_seen, "get_raw_entropy never re-asserted"
-    expected = list(range(1, DRBG_CYCLES - 1))
+    expected = list(range(1, DRBG_CYCLES + 1))
     assert observed == expected, \
         f"drbg_cntr sequence wrong.\n  Expected: {expected}\n  Got:      {observed}"
     dut._log.info(f"✓ drbg_cntr sequence correct: {observed} — TC5 PASSED ✓")
@@ -641,7 +641,7 @@ async def sipo_test(dut):
     assert int(dut.dead_flag.value) == 0, "dead_flag set — unexpected failure"
     dut._log.info("✓ No dead_flag — system healthy")
     dut._log.info("TC8 PASSED ✓")
-
+    
 
 # Output word statistics  (physics noise)
 @cocotb.test()

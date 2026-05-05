@@ -1,12 +1,16 @@
 typedef logic [7:0] ubyte;
 typedef logic [3:0] unibble;
+typedef logic [3:0][3:0][7:0] state_t;
 
 module s_box(
-    output logic [3:0][3:0][7:0] subBytes,
-    input logic [3:0][3:0][7:0] state);
+    output state_t subBytes,
+    input state_t state,
+    input logic [447:0] rand_num);
 
-    ubyte [3:0][3:0] a_byte; // to store a1 and a0
-    unibble [3:0][3:0] d;
+    state_t masked_a_byte; // to store a1 and a0
+    state_t d;  // stores denominator value corresponding to every state element
+    state_t masked_d_inv;  // stores inverse of denominator of every state element
+    logic [3:0][3:0][15:0] inv_A;  // stores every element of state array in tower field inversion form
     genvar i;
 
     // Multiplication in GF(2^4). Reduction polynomial is x^4 + x + 1. So reduction constant is (0011)
@@ -135,24 +139,24 @@ module s_box(
     function automatic logic [15:0] masked_A_inverse(
         input ubyte d_inv_masks,  // masks of inverse of denominator
         input ubyte a_masks,  // masks of tower field representation of state array byte
-        input ubyte rand_byte);  // concatenation of random words {rand_w6, rand_w5, rand_w1, rand_w0}
+        input logic [15:0] rand_word);  // concatenation of random words {rand_w6, rand_w5, rand_w1, rand_w0}
 
         unibble f1, f2, g1, g2;
         logic [1:0][3:0] temp;
 
         temp[0] = a_masks[7:4] ^ a_masks[3:0];  // a1m xor a0m
-        temp[1] = rand_byte[7:4] ^ rand_byte[3:0];  // a1r xor a0r
+        temp[1] = rand_word[7:4] ^ rand_word[3:0];  // a1r xor a0r
 
         // computing new_a1
-        f1 = (d_inv_masks[3:0] & a_masks[7:4]) ^ rand_byte[11:8];  // (e1 * a1m) xor rand_w5
-        f2 = (d_inv_masks[3:0] & rand_byte[7:4]) ^ (d_inv_masks[7:4] & a_masks[7:4]) ^
-             (d_inv_masks[7:4] & rand_byte[7:4]) ^ rand_byte[11:8];  // (e1 * a1r) xor (e2 * a1m) xor (e2 * a1r) xor rand_w5
+        f1 = (d_inv_masks[3:0] & a_masks[7:4]) ^ rand_word[11:8];  // (e1 * a1m) xor rand_w5
+        f2 = (d_inv_masks[3:0] & rand_word[7:4]) ^ (d_inv_masks[7:4] & a_masks[7:4]) ^
+             (d_inv_masks[7:4] & rand_word[7:4]) ^ rand_word[11:8];  // (e1 * a1r) xor (e2 * a1m) xor (e2 * a1r) xor rand_w5
         // so new_a1 = f1 ^ f2;
 
         // computing new_a0
-        g1 = (e1 & temp[0]) ^ rand_byte[15:12];  // (e1 * (a1m xor a0m)) xor rand_w6
+        g1 = (e1 & temp[0]) ^ rand_word[15:12];  // (e1 * (a1m xor a0m)) xor rand_w6
         // (e1 * (a1r xor a0r)) xor (e2 * (a1m xor a0m)) xor (e2 * (a1r xor a0r)) xor rand_w6
-        g2 = (e1 & temp[1]) ^ (e2 & temp[0]) ^ (e2 & temp[1]) ^ rand_byte[15:12];  
+        g2 = (e1 & temp[1]) ^ (e2 & temp[0]) ^ (e2 & temp[1]) ^ rand_word[15:12];  
         // so new_a0 = g1 ^ g2;
         // now A_inverse = {new_a1, new_a0}
 
@@ -221,13 +225,20 @@ module s_box(
         return (b_prime_share1 ^ b_prime_share2);
     endfunction
 
+    // this block computes corresponding values for every byte of input state array
     generate
         for(i=0; i<16; i++) begin
-            // converting all bytes in state array to tower field
-            assign a_byte[i%4][i/4] = tower_field(state[i%4][i/4]);
+            // converting all bytes in state array to tower field 
+            assign masked_a_byte[i%4][i/4] = tower_field(state[i%4][i/4], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
 
-            // computing denominator term (D) for every tower field
-            assign d[i%4][i/4] = denominator(a_byte[i%4][i/4]);
+            // computing masked denominator term (D) for every tower field
+            assign d[i%4][i/4] = masked_denominator(masked_a_byte[i%4][i/4], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+
+            // computing inverse of d 
+            assign masked_d_inv[i%4][i/4] = masked_d_inverse(d[i%4][i/4], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
+
+            // computing inverse of A that is tower field inversion
+            assign inv_A[i%4][i/4] = masked_A_inverse(masked_d_inv[i%4][i/4], masked_a_byte[i%4][i/4], {rand_num[((28*i)+24) +: 4], rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
         end
     endgenerate
 endmodule
