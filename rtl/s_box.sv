@@ -231,7 +231,7 @@ module s_box(
     // this block computes corresponding values for every byte of input state array
     generate
         for(i=0; i<16; i++) begin
-            // piplining the operations 
+            // pipelining the operations 
             always_ff@(posedge clk) begin
                 if(!rst_n) begin
                     masked_a_byte[i%4][i/4] <= 0;
