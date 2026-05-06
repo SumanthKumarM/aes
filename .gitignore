@@ -7,3 +7,9 @@ sim/sim.log
 synth/synth.log
 synth/trng_schematic.dot
 synth/trng.json
+docs/s_box.pdf
+docs/s_box.html
+docs/trng.html
+docs/trng.pdf
+docs/aes_gcm.pdf
+docs/aes_gcm.html

@@ -1,0 +1,13 @@
+= Composite Masked AES S-Box — Project Documentation
+:description: Master document for the masked AES S-Box and TRNG implementation
+:toc:
+:toc-title: Table of Contents
+:sectnums:
+:doctype: book
+
+This master document consolidates the full technical documentation for the *Composite Masked AES S-Box* project.
+It covers both the S-Box implementation and the True Random Number Generator (TRNG) that supplies fresh randomness for masked operations.
+
+include::s_box.adoc[leveloffset=+1]
+
+include::trng.adoc[leveloffset=+1]
