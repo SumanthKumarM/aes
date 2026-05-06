@@ -237,10 +237,11 @@ module s_box(
                     masked_a_byte[i%4][i/4] <= 0;
                     denominator[i%4][i/4] <= 0;
                     masked_d_inv[i%4][i/4] <= 0;
-                    masked_a_byte_delay2 <= 0;
-                    masked_a_byte_delay3 <= 0;
-                    rand_num_delay2 <= 0;
-                    rand_num_delay3 <= 0;
+                    masked_a_byte_delay2[i%4][i/4] <= 0;
+                    masked_a_byte_delay3[i%4][i/4] <= 0;
+                    rand_num_delay2[i%4][i/4] <= 0;
+                    rand_num_delay3[i%4][i/4] <= 0;
+                    rand_num_delay4[i%4][i/4] <= 0;
                     masks_of_A_inv[i%4][i/4] <= 0;
                     subBytes <= 0;
                 end
