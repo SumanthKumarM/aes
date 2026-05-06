@@ -5,12 +5,15 @@ typedef logic [3:0][3:0][7:0] state_t;
 module s_box(
     output state_t subBytes,
     input state_t state,
-    input logic [447:0] rand_num);
+    input logic [447:0] rand_num,
+    input logic rst_n, clk);  
 
     state_t masked_a_byte; // to store a1 and a0
-    state_t d;  // stores denominator value corresponding to every state element
+    state_t denominator;  // stores denominator value corresponding to every state element
     state_t masked_d_inv;  // stores inverse of denominator of every state element
-    logic [3:0][3:0][15:0] inv_A;  // stores every element of state array in tower field inversion form
+    logic [3:0][3:0][15:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
+    state_t masked_a_byte_delay2, masked_a_byte_delay3;  // delayed versions of masked_a_byte
+    state_t rand_num_delay2, rand_num_delay3, rand_num_delay4;  // delayed versions of rand_num
     genvar i;
 
     // Multiplication in GF(2^4). Reduction polynomial is x^4 + x + 1. So reduction constant is (0011)
@@ -51,7 +54,7 @@ module s_box(
     // converting bytes to tower field representation and computing their masks
     function automatic logic[15:0] tower_field(
         input ubyte s_byte,  // raw state array element
-        input rand_byte);  // random numbers used in masking tower field elements {a1r, a0r}
+        input ubyte rand_byte);  // random numbers used in masking tower field elements {a1r, a0r}
 
         ubyte a, masked_a;
 
@@ -228,17 +231,37 @@ module s_box(
     // this block computes corresponding values for every byte of input state array
     generate
         for(i=0; i<16; i++) begin
-            // converting all bytes in state array to tower field 
-            assign masked_a_byte[i%4][i/4] = tower_field(state[i%4][i/4], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+            // piplining the operations 
+            always_ff@(posedge clk) begin
+                if(!rst_n) begin
+                    masked_a_byte[i%4][i/4] <= 0;
+                    denominator[i%4][i/4] <= 0;
+                    masked_d_inv[i%4][i/4] <= 0;
+                    masked_a_byte_delay2 <= 0;
+                    masked_a_byte_delay3 <= 0;
+                    rand_num_delay2 <= 0;
+                    rand_num_delay3 <= 0;
+                    masks_of_A_inv[i%4][i/4] <= 0;
+                    subBytes <= 0;
+                end
+                else begin
+                    // since masks_of_A_inv uses masked_a_byte and (rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]) 
+                    // they have to be 3 and 4 cycles delayed as masks_of_A_inv is at 4 cycles delay in pipeline
+                    masked_a_byte_delay2[i%4][i/4] <= masked_a_byte[i%4][i/4];
+                    masked_a_byte_delay3[i%4][i/4] <= masked_a_byte_delay2[i%4][i/4];
+                    rand_num_delay2[i%4][i/4] <= {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]};
+                    rand_num_delay3[i%4][i/4] <= rand_num_delay2[i%4][i/4];
+                    rand_num_delay4[i%4][i/4] <= rand_num_delay3[i%4][i/4];
 
-            // computing masked denominator term (D) for every tower field
-            assign d[i%4][i/4] = masked_denominator(masked_a_byte[i%4][i/4], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-
-            // computing inverse of d 
-            assign masked_d_inv[i%4][i/4] = masked_d_inverse(d[i%4][i/4], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
-
-            // computing inverse of A that is tower field inversion
-            assign inv_A[i%4][i/4] = masked_A_inverse(masked_d_inv[i%4][i/4], masked_a_byte[i%4][i/4], {rand_num[((28*i)+24) +: 4], rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                    // different stages of s-box
+                    masked_a_byte[i%4][i/4] <= tower_field(state[i%4][i/4], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                    denominator[i%4][i/4] <= masked_denominator(masked_a_byte[i%4][i/4], {rand_num[((28*i)+8) +: 4], rand_num_delay2[i%4][i/4]});
+                    masked_d_inv[i%4][i/4] <= masked_d_inverse(denominator[i%4][i/4], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
+                    masks_of_A_inv[i%4][i/4] <= masked_A_inverse(masked_d_inv[i%4][i/4], masked_a_byte_delay3[i%4][i/4], 
+                                                {rand_num[((28*i)+24) +: 4], rand_num[((28*i)+20) +: 4], rand_num_delay4[i%4][i/4]});
+                    subBytes[i%4][i/4] <= affine_transformation(masks_of_A_inv[i%4][i/4]);
+                end
+            end
         end
     endgenerate
 endmodule
