@@ -3,7 +3,7 @@ RTL_DIR = ../rtl
 TB_DIR = ../tb
 SIM_DIR = .
 SYNTH_DIR = ../synth
-SYNTH_SCRIPT = $(SYNTH_DIR)/synth.ys
+SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
 
 PARAM_FILE = $(RTL_DIR)/ro_param_pkg.sv
 
@@ -87,8 +87,8 @@ lint: lint-style lint-syntax lint-synth
 
 .PHONY: synth
 synth: $(PARAM_FILE)
-	@echo "Running Yosys Synthesis Script..."
-	cd $(SYNTH_DIR) && $(YOSYS) -s $(SYNTH_SCRIPT) 2>&1 | tee synth.log
+	@echo "Running Yosys Synthesis Script for $(block)..."
+	cd $(SYNTH_DIR) && BLOCK=$(block) python block_lvl_synth_gen.py 2>&1 | tee synth.log
 
 .PHONY: clean_all
 clean_all: clean

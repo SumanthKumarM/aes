@@ -2,10 +2,10 @@
 plugin -i slang
 
 # Read the design using Slang, Slang handles the package and the arrays correctly.
-read_slang ../rtl/ro_param_pkg.sv ../rtl/trng.sv
+read_slang ../rtl/trng_param_pkg.sv ../rtl/${BLOCK}.sv
 
 # Elaborate the design hierarchy
-hierarchy -check -top trng
+hierarchy -check -top ${BLOCK}
 
 # netlist generation
 proc
@@ -17,10 +17,7 @@ opt
 check
 
 # Print resource statistics
-stat
+stat ${BLOCK}
 
-# Generate and open a schematic 
-show -colors 2 -width -signed trng
-
-# Export the schematic to a PDF file
-show -format dot -prefix trng_schematic trng
+# Export schematic to a .dot file 
+show -format dot -prefix ${BLOCK}_schematic ${BLOCK}
