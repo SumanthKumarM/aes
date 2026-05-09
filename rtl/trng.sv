@@ -3,10 +3,10 @@ import trng_param_pkg::*;
 typedef logic [4:0][4:0][63:0] state_t;
 
 module trng(
-    output logic [447:0] rand_word,  // 448-bit random packet to S-box
-    output logic key_ready_req,  // tells S-box that random words are ready
+    output logic [1343:0] rand_word,  // 448-bit random packet to S-box
+    output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
-    input logic s_box_ack,  // S-box acknowledges receipt of random words
+    input logic s_box_ready,  // S-box acknowledges receipt of random words
     input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic clk, ext_rst_n);
@@ -76,12 +76,12 @@ module trng(
     health_tests hlth_tst(health_error, total_failure, rand_bit, enb_health_tests, clk, ext_rst_n);
 
     // keccak conditioning block (clk domain)
-    keccak_cond keccak(rand_word, ready, key_ready_req, entropy_word, 
-    get_raw_entropy, s_box_ack, valid, clk, local_rst_n);
+    keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, 
+    get_raw_entropy, s_box_ready, valid, clk, local_rst_n);
 
     // control unit (clk domain)
     control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, 
-    health_error, total_failure, key_ready_req, clk, ext_rst_n);
+    health_error, total_failure, trng_key_valid, clk, ext_rst_n);
 endmodule
 
 // entropy collector
@@ -121,7 +121,7 @@ endmodule
 typedef enum logic [1:0] {ABSORB, PERMUTE, SQUEEZ} Keccak_states;
 
 module keccak_cond (
-    output logic [447:0] rand_word,  // 112 4-bit random words needed for S-Box()
+    output logic [1343:0] rand_word,  // 1344 random bits needed for S-Box()
     output logic ready,  // indicates entropy collector that this block isi ready to accecpt raw entropy
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
@@ -134,7 +134,6 @@ module keccak_cond (
     logic [191:0] temp_entropy;  // to store raw entropy bits
     logic [4:0] round_cntr;  // keeps track of number of rounds
     logic [1:0] rx_cntr;  // keeps track of handshakes
-    logic [1:0] word_tx_cntr;  // keeps track of random 448-bit packets that are being sent to AES_GCM
     Keccak_states fsm_state;  
 
     // flattening state matrix to access slices of it
@@ -215,7 +214,6 @@ module keccak_cond (
             temp_entropy <= 0;
             round_cntr <= 0;
             rx_cntr <= 0;
-            word_tx_cntr <= 0;
             ready <= 0;
             key_ready_req <= 0;
         end
@@ -223,7 +221,6 @@ module keccak_cond (
             case(fsm_state)
                 ABSORB: begin
                     key_ready_req <= 0;
-                    word_tx_cntr <= 0;
                     round_cntr <= 0;
                     rand_word <= rand_word;
 
@@ -265,7 +262,6 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
                     key_ready_req <= 0;
-                    word_tx_cntr <= 0;
                     fsm_state <= (round_cntr == 23) ? SQUEEZ : PERMUTE;
                 end
                 SQUEEZ: begin
@@ -273,22 +269,9 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    if(word_tx_cntr < 3 && s_box_ack) word_tx_cntr <= word_tx_cntr + 1;
-                    else if(word_tx_cntr == 3) word_tx_cntr <= 0;
-                    else word_tx_cntr <= word_tx_cntr;
-
-                    // PISO logic to send 448-bit random packets to AES_GCM block 
-                    case (word_tx_cntr)
-                        2'b00: rand_word <= state_flat[447:0];
-                        2'b01: rand_word <= state_flat[895:448];
-                        2'b10: rand_word <= state_flat[1343:896]; 
-                        default: rand_word <= 0;
-                    endcase
-
-                    // when random key is available key_ready_req becomes high and when all data is sent it becomes low
-                    key_ready_req <= (word_tx_cntr != 3) ? 1'b1 : 0;
-                    
-                    fsm_state <= (word_tx_cntr == 3) ? ABSORB : SQUEEZ;  
+                    rand_word <= (s_box_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
+                    key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
+                    fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
                 end
                 default: fsm_state <= ABSORB;
             endcase
