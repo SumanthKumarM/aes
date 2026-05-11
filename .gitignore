@@ -3,14 +3,24 @@ sim/sim_build
 sim/.cache  /
 sim/dump.vcd
 sim/results.xml
-sim/sim.log
-synth/synth.log
+sim/*.log
+sim/*.jou
 synth/*.dot
 synth/*.json
 synth/*.pdf
+synth/*.svg.new
+synth/*.dcp
+synth/*.rpt
+synth/*.jou
+synth/*.log
+synth/*.v
+synth/*.backup.*
 docs/s_box.pdf
 docs/s_box.html
 docs/trng.html
 docs/trng.pdf
 docs/aes_gcm.pdf
 docs/aes_gcm.html
+lint/*.jou
+lint/*.log
+lint/*.backup.*

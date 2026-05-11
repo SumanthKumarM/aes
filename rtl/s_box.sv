@@ -1,6 +1,6 @@
 typedef logic [7:0] ubyte;
 typedef logic [3:0] unibble;
-typedef logic [3:0][3:0][7:0] state_t;
+typedef logic [3:0][3:0][7:0] s_box_state_t;
 typedef enum logic [2:0] {
     TOWER_FIELD, 
     MASKED_D,
@@ -11,16 +11,16 @@ typedef enum logic [2:0] {
 } s_box_states;
 
 module s_box(
-    output state_t subBytes,
+    output s_box_state_t subBytes,
     output logic s_box_ready,
-    input state_t state,
+    input s_box_state_t state,
     input logic [1343:0] rand_num,
     input logic trng_key_valid,
     input logic rst_n, clk);  
 
-    state_t masked_a_byte; // to store a1 and a0
-    state_t denominator;  // stores denominator value corresponding to every state element
-    state_t masked_d_inv;  // stores inverse of denominator of every state element
+    s_box_state_t masked_a_byte; // to store a1 and a0
+    s_box_state_t denominator;  // stores denominator value corresponding to every state element
+    s_box_state_t masked_d_inv;  // stores inverse of denominator of every state element
     logic [3:0][3:0][15:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [3:0][3:0][15:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
     logic [1:0] s_box_round_cntr;
