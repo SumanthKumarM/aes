@@ -7,15 +7,18 @@ typedef enum logic [2:0] {
     MASKED_D_INV,
     MASKED_A_INV,
     MASKED_B_INV,
-    SUB_BYTES
+    SUB_BYTES,
+    RESET_TRNG,
 } s_box_states;
 
 module s_box(
-    output s_box_state_t subBytes,
-    output logic s_box_ready,
-    input s_box_state_t state,
-    input logic [1343:0] rand_num,
-    input logic trng_key_valid,
+    output s_box_state_t subBytes,  // subByte of each element of state array
+    output logic s_box_ready,  // tells trng that s-box is ready to accept random bits
+    output logic rst_trng,  // resets TRNG when health test results in fatal failures
+    input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
+    input s_box_state_t state,  // input state matrix/array
+    input logic [1343:0] rand_num,  // random bits from TRNG
+    input logic trng_key_valid,  // asserted bt TRNG when it has random bits to give to s-box
     input logic rst_n, clk);  
 
     s_box_state_t masked_a_byte; // to store a1 and a0
@@ -244,38 +247,52 @@ module s_box(
         if(!rst_n) begin
             s_box_ready <= 0;
             s_box_round_cntr <= 0;
+            rst_trng <= 0;
             fsm_state <= TOWER_FIELD;
         end
         else begin
             case(fsm_state)
                 TOWER_FIELD: begin
                     s_box_ready <= 1;  // s-box is ready to accept random bits from TRNG
+                    rst_trng <= 0;
                     s_box_round_cntr <= s_box_round_cntr;
-                    fsm_state <= (trng_key_valid) ? MASKED_D : TOWER_FIELD;
+                    if(trng_dead_flag) fsm_state <= RESET_TRNG;
+                    else fsm_state <= (trng_key_valid) ? MASKED_D : TOWER_FIELD;
                 end 
                 MASKED_D: begin
                     s_box_ready <= 0;
+                    rst_trng <= 0;
                     s_box_round_cntr <= s_box_round_cntr;
-                    fsm_state <= MASKED_D_INV;
+                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                 end
                 MASKED_D_INV: begin
                     s_box_ready <= 0;
+                    rst_trng <= 0;
                     s_box_round_cntr <= s_box_round_cntr;
-                    fsm_state <= MASKED_A_INV;
+                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                 end
                 MASKED_A_INV: begin
                     s_box_ready <= 0;
+                    rst_trng <= 0;
                     s_box_round_cntr <= s_box_round_cntr;
-                    fsm_state <= MASKED_B_INV;
+                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                 end
                 MASKED_B_INV: begin
                     s_box_ready <= 0;
+                    rst_trng <= 0;
                     s_box_round_cntr <= s_box_round_cntr;
-                    fsm_state <= SUB_BYTES;
+                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                 end
                 SUB_BYTES: begin
                     s_box_ready <= 0;
+                    rst_trng <= 0;
                     s_box_round_cntr <= (s_box_round_cntr == 2) ? 0 : s_box_round_cntr + 1;  // this selects the slice of rand_num
+                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
+                end
+                RESET_TRNG: begin
+                    s_box_ready <= 0;
+                    s_box_round_cntr <= s_box_round_cntr;
+                    rst_trng <= 1;  // resets TRNG as fatal failure has occurred
                     fsm_state <= TOWER_FIELD;
                 end
                 default: fsm_state <= TOWER_FIELD;
