@@ -5,8 +5,8 @@ SIM_DIR = .
 SYNTH_DIR = ../synth
 LINT_DIR = ../lint
 SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
-
-PARAM_FILE = $(RTL_DIR)/ro_param_pkg.sv
+TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
+TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
 $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doesn't exist
@@ -23,7 +23,7 @@ YOSYS = yosys
 
 # tool selection
 tool ?= vivado  # default tool
-SELECTED_TOOL = $(strip $(tool))
+SELECTED_TOOL := $(strip $(tool))
 
 # vivado paths
 VIVADO = vivado -mode batch -notrace
@@ -34,19 +34,25 @@ VIVADO_SYNTH = vivado -mode batch -notrace -journal $(SYNTH_DIR)/vivado.jou -log
 EXTRA_ARGS += --trace --trace-structs 
 COMPILE_ARGS += -I$(RTL_DIR) --timescale 1ps/1ps --timing --x-initial unique --x-assign 0
 
+# generate parameter package file if it misses
+$(TRNG_PARAM_FILE): gen_param
+
 # RTL sources
-VERILOG_SOURCES = $(PARAM_FILE) $(RTL_DIR)/trng.sv
+BLOCK_DEPS =
+VERILOG_SOURCES = $(TYPEDEF_PKG)
+
+ifeq ($(block),trng)
+	BLOCK_DEPS += $(TRNG_PARAM_FILE)
+	VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
+endif
+
+VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
 
 # handle specific test selection
 ifneq ($(test),)
   COCOTB_TEST_FILTER = $(test)
   export COCOTB_TEST_FILTER
 endif
-
-# generate parameter package file if it misses
-$(PARAM_FILE): 
-	@echo "Geberating RTL parameters..."
-	python $(SIM_DIR)/gen_param.py
 
 # simulates all tests
 all: run_all
@@ -57,11 +63,11 @@ gen_param:
 	python $(SIM_DIR)/gen_param.py
 
 .PHONY: run_all
-run_all: $(PARAM_FILE)
+run_all: $(BLOCK_DEPS)
 	$(MAKE) sim 2>&1 | tee sim.log
 
 .PHONY: run_test
-run_test: $(PARAM_FILE)
+run_test: $(BLOCK_DEPS)
 	@echo "Running specific test: $(test)"
 	$(MAKE) sim 2>&1 | tee sim.log
 
@@ -71,17 +77,17 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 
 # Linting Targets 
 .PHONY: lint-style
-lint-style: $(PARAM_FILE)
+lint-style: $(BLOCK_DEPS)
 	@echo "Running Verible Style Lint..."
 	$(VERIBLE_LINT) $(VERILOG_SOURCES) --rules_config_search
 
 .PHONY: lint-syntax
-lint-syntax: $(PARAM_FILE)
+lint-syntax: $(BLOCK_DEPS)
 	@echo "Running Slang Syntax Check..."
 	$(SLANG) $(VERILOG_SOURCES) -I$(RTL_DIR) --top $(block)
 
 .PHONY: lint-synth
-lint-synth: $(PARAM_FILE)
+lint-synth: $(BLOCK_DEPS)
 	@echo "Running Yosys Synthesis Lint (Slang Parser)..."
 	$(YOSYS) -p "plugin -i slang; \
 				read_slang $(VERILOG_SOURCES); \
@@ -91,7 +97,7 @@ lint-synth: $(PARAM_FILE)
 				stat"
 
 .PHONY: lint-vivado
-lint-vivado: $(PARAM_FILE)
+lint-vivado: $(BLOCK_DEPS)
 	@echo "Running Vivado Elaborated Design Lint for $(block)..."
 	cd $(LINT_DIR) && $(VIVADO_LINT) -source block_lvl_lint.tcl -tclargs $(block)
 
@@ -106,7 +112,7 @@ lint:
 	fi
 
 .PHONY: synth
-synth: $(PARAM_FILE)
+synth: $(BLOCK_DEPS)
 	@echo "Running synthesis for $(block) using $(tool)..."
 	@if [ "$(SELECTED_TOOL)" = "vivado" ]; then \
 		cd $(SYNTH_DIR) && $(VIVADO_SYNTH) -source block_lvl_synth.tcl -tclargs $(block) 2>&1 | tee $(SYNTH_DIR)/vivado_synth.log; \

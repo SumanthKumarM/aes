@@ -1,5 +1,5 @@
 import trng_param_pkg::*;
-import type_def_pkg::*;
+import type_defs_pkg::*;
 
 module trng(
     output logic [1343:0] rand_word,  // 448-bit random packet to S-box

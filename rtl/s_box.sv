@@ -1,4 +1,4 @@
-import type_def_pkg::*;
+import type_defs_pkg::*;
 
 module s_box(
     output state_matrix_t subBytes,  // subByte of each element of state array
