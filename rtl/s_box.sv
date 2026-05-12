@@ -1,29 +1,19 @@
-typedef logic [7:0] ubyte;
-typedef logic [3:0] unibble;
-typedef logic [3:0][3:0][7:0] s_box_state_t;
-typedef enum logic [2:0] {
-    TOWER_FIELD, 
-    MASKED_D,
-    MASKED_D_INV,
-    MASKED_A_INV,
-    MASKED_B_INV,
-    SUB_BYTES,
-    RESET_TRNG,
-} s_box_states;
+import type_def_pkg::*;
 
 module s_box(
-    output s_box_state_t subBytes,  // subByte of each element of state array
+    output state_matrix_t subBytes,  // subByte of each element of state array
     output logic s_box_ready,  // tells trng that s-box is ready to accept random bits
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
-    input s_box_state_t state,  // input state matrix/array
+    input logic [127:0] s_box_input,  // 128-bit input to s-box which gets mapped to state matrix
     input logic [1343:0] rand_num,  // random bits from TRNG
     input logic trng_key_valid,  // asserted bt TRNG when it has random bits to give to s-box
     input logic rst_n, clk);  
 
-    s_box_state_t masked_a_byte; // to store a1 and a0
-    s_box_state_t denominator;  // stores denominator value corresponding to every state element
-    s_box_state_t masked_d_inv;  // stores inverse of denominator of every state element
+    state_matrix_t state;  // input state matrix/array
+    state_matrix_t masked_a_byte; // to store a1 and a0
+    state_matrix_t denominator;  // stores denominator value corresponding to every state element
+    state_matrix_t masked_d_inv;  // stores inverse of denominator of every state element
     logic [3:0][3:0][15:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [3:0][3:0][15:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
     logic [1:0] s_box_round_cntr;
@@ -241,6 +231,13 @@ module s_box(
 
         return (b_prime_share1 ^ b_prime_share2);
     endfunction
+
+    // mapping 128-bit input into state matrix
+    always_comb begin
+        for(int i=0; i<16; i++) begin
+            state[i%4][i/4] = s_box_input[(32*(i/4))+(8*(i%4)) +: 8];
+        end
+    end
 
     // sequential block that assertes s_box_ready signal and computes s_box_round_cntr accordingly
     always_ff@(posedge clk) begin

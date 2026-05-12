@@ -1,6 +1,5 @@
 import trng_param_pkg::*;
-
-typedef logic [4:0][4:0][63:0] state_t;
+import type_def_pkg::*;
 
 module trng(
     output logic [1343:0] rand_word,  // 448-bit random packet to S-box
@@ -118,8 +117,6 @@ module entropy_clctr(
 endmodule
 
 // Keccak conditioning block
-typedef enum logic [1:0] {ABSORB, PERMUTE, SQUEEZ} Keccak_states;
-
 module keccak_cond (
     output logic [1343:0] rand_word,  // 1344 random bits needed for S-Box()
     output logic ready,  // indicates entropy collector that this block isi ready to accecpt raw entropy
@@ -130,7 +127,7 @@ module keccak_cond (
     input logic valid,  // from entropy collector indicating that it's ready to send the data
     input logic clk, rst_n);
     
-    state_t state;  // state matrix for Keccak conditioning block
+    keccak_state_t state;  // state matrix for Keccak conditioning block
     logic [191:0] temp_entropy;  // to store raw entropy bits
     logic [4:0] round_cntr;  // keeps track of number of rounds
     logic [1:0] rx_cntr;  // keeps track of handshakes
@@ -141,11 +138,11 @@ module keccak_cond (
     assign state_flat = {>>{state}};
 
     // computing theta for state matrix
-    function automatic state_t theta(input state_t s);
+    function automatic keccak_state_t theta(input keccak_state_t s);
         logic [4:0][63:0] c;  // column parity bits
         logic [4:0][63:0] d, c_rot;  // theta diffusion term, left rotation of c
         int m, n;
-        state_t diff_state;
+        keccak_state_t diff_state;
 
         for(int i=0; i<5; i++) begin
             // computing column parity
@@ -167,7 +164,7 @@ module keccak_cond (
     endfunction
 
     // computing rho for state matrix
-    function automatic state_t rho(input state_t s);
+    function automatic keccak_state_t rho(input keccak_state_t s);
         int n;
         logic [63:0] lane;
 
@@ -180,8 +177,8 @@ module keccak_cond (
     endfunction
 
     // computing pi for state matrix
-    function automatic state_t pi(input state_t s);
-        state_t temp;
+    function automatic keccak_state_t pi(input keccak_state_t s);
+        keccak_state_t temp;
         int x, y;
         for(int i=0; i<25; i++) begin
             x = i/5;  // rows
@@ -192,8 +189,8 @@ module keccak_cond (
     endfunction
 
     // computing chi which is non-linear
-    function automatic state_t chi(input state_t s);
-        state_t temp;
+    function automatic keccak_state_t chi(input keccak_state_t s);
+        keccak_state_t temp;
         for(int i=0; i<25; i++) begin
             temp[i/5][i%5] = s[i/5][i%5] ^ (~s[i/5][((i%5)+1)%5] & s[i/5][((i%5)+2)%5]);
         end
@@ -201,7 +198,7 @@ module keccak_cond (
     endfunction
 
     // computing iota for state matrix
-    function automatic state_t iota(input state_t s, logic [63:0] round_const);
+    function automatic keccak_state_t iota(input keccak_state_t s, logic [63:0] round_const);
         s[0][0] = s[0][0] ^ round_const;
         return s;
     endfunction
