@@ -22,7 +22,7 @@ module s_box(
 
     // Multiplication in GF(2^4). Reduction polynomial is x^4 + x + 1. So reduction constant is (0011)
     function automatic unibble xTimes(input unibble m);
-        return (m[3]==1) ? ((m << 1) ^ 4'b0011) : (m << 1);
+        return (m[3]) ? ((m << 1) ^ 4'b0011) : (m << 1);
     endfunction
 
     // computes square of an element
@@ -402,6 +402,14 @@ module s_box(
                             masks_of_b_inv[i%4][i/4] <= masks_of_b_inv[i%4][i/4];
 
                             subBytes[i%4][i/4] <= affine_transformation(masks_of_b_inv[i%4][i/4]);
+                        end
+                        RESET_TRNG: begin
+                            masked_a_byte[i%4][i/4] <= masked_a_byte[i%4][i/4];
+                            denominator[i%4][i/4] <= denominator[i%4][i/4];
+                            masked_d_inv[i%4][i/4] <= masked_d_inv[i%4][i/4];
+                            masks_of_A_inv[i%4][i/4] <= masks_of_A_inv[i%4][i/4];
+                            masks_of_b_inv[i%4][i/4] <= masks_of_b_inv[i%4][i/4];
+                            subBytes[i%4][i/4] <= subBytes[i%4][i/4];
                         end
                         default: begin  
                             denominator[i%4][i/4] <= denominator[i%4][i/4];
