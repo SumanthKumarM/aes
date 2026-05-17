@@ -57,7 +57,7 @@ module s_box #(
     endfunction
 
     // converting bytes to tower field representation and computing their masks
-    function automatic logic[15:0] tower_field(
+    function automatic ubyte tower_field(
         input ubyte s_byte,  // raw state array element
         input ubyte rand_byte);  // random numbers used in masking tower field elements {a1r, a0r}
 
