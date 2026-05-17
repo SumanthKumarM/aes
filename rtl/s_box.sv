@@ -290,8 +290,8 @@ module s_box #(
                     masked_a_byte[(8*i) +: 8] <= 0;
                     denominator[(8*i) +: 8] <= 0;
                     masked_d_inv[(8*i) +: 8] <= 0;
-                    masks_of_A_inv[(16*i) +: 8] <= 0;
-                    masks_of_b_inv[(16*i) +: 8] <= 0;
+                    masks_of_A_inv[(16*i) +: 16] <= 0;
+                    masks_of_b_inv[(16*i) +: 16] <= 0;
                     subBytes[(8*i) +: 8] <= 0;
                 end
                 else begin
@@ -302,8 +302,8 @@ module s_box #(
                         TOWER_FIELD: begin  
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
@@ -319,8 +319,8 @@ module s_box #(
                         MASKED_D: begin
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
@@ -336,8 +336,8 @@ module s_box #(
                         MASKED_D_INV: begin
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
@@ -354,31 +354,31 @@ module s_box #(
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
                                 case(s_box_round_cntr)
                                     2'b00: begin
-                                        masks_of_A_inv[(16*i) +: 8] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
+                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
                                                                     rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     end 
                                     2'b01: begin
-                                        masks_of_A_inv[(16*i) +: 8] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+472) +: 4], 
+                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+472) +: 4], 
                                                                     rand_num[((28*i)+468) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
                                     end
                                     2'b10: begin
-                                        masks_of_A_inv[(16*i) +: 8] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+920) +: 4], 
+                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+920) +: 4], 
                                                                     rand_num[((28*i)+916) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
                                     end
                                     default: begin
-                                        masks_of_A_inv[(16*i) +: 8] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
+                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
                                                                     rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     end 
                                 endcase
                             end
                             else begin
-                                masks_of_A_inv[(16*i) +: 8] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
+                                masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
                                                                rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                             end
                         end
@@ -386,33 +386,33 @@ module s_box #(
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
                             
-                            masks_of_b_inv[(16*i) +: 8] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 8]);
+                            masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
                         end
                         SUB_BYTES: begin
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
 
-                            subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 8]);
+                            subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
                         end
                         RESET_TRNG: begin
                             masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
                         end
                         default: begin  
                             denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                             masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 8] <= masks_of_A_inv[(16*i) +: 8];
-                            masks_of_b_inv[(16*i) +: 8] <= masks_of_b_inv[(16*i) +: 8];
+                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                             subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
