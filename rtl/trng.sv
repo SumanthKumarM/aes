@@ -219,7 +219,6 @@ module keccak_cond (
                 ABSORB: begin
                     key_ready_req <= 0;
                     round_cntr <= 0;
-                    rand_word <= rand_word;
 
                     // initial stage: round-0
                     // state[191:0]     = true noise source entropy / feedback
@@ -397,7 +396,6 @@ module control_unit(
                 end 
                 BIST: begin
                     local_rst_n <= 1;
-                    drbg_cntr <= drbg_cntr;
 
                     // enabling blocks
                     noise_src_enb_n <= 0;
@@ -416,12 +414,6 @@ module control_unit(
                     endcase
                 end
                 WAIT_FOR_XFER: begin
-                    // holding their previous state
-                    noise_src_enb_n <= noise_src_enb_n;
-                    enb_health_tests <= enb_health_tests;
-                    local_rst_n <= local_rst_n;
-                    dead_flag <= dead_flag;
-                    err_state_delay <= err_state_delay;
                     get_raw_entropy <= 0;  // no entropy collection when waiting for acknowledgement
 
                     // Increment exactly once per completed key transfer
@@ -441,12 +433,6 @@ module control_unit(
                     // resets noise source, entropy collector and Keccak conditioning block 
                     // since they gave psuedo randomness instead of true randomness
                     local_rst_n <= 0;
-
-                    // holding their previous state
-                    noise_src_enb_n <= noise_src_enb_n;
-                    enb_health_tests <= enb_health_tests;
-                    get_raw_entropy <= get_raw_entropy;
-                    dead_flag <= dead_flag;
                     drbg_cntr <= 0;  // resetting this so that Keccak block can start using raw entropy instead of DRBG feedback
 
                     err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
