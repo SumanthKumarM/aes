@@ -167,40 +167,40 @@ module keccak_cond (
     function automatic keccak_state_t rho(input keccak_state_t s);
         int n;
         logic [63:0] lane;
+        keccak_state_t rot_s;
 
         for(int i=0; i<25; i++) begin
             n = RHO_OFFSETS[i/5][i%5];
             lane = s[i/5][i%5];
-            s[i/5][i%5] = (n == 0) ? lane : ((lane << n) | (lane >> (64 - n)));
+            rot_s[i/5][i%5] = (n == 0) ? lane : ((lane << n) | (lane >> (64 - n)));
         end
-        return s;
+        return rot_s;
     endfunction
 
     // computing pi for state matrix
     function automatic keccak_state_t pi(input keccak_state_t s);
         keccak_state_t temp;
-        int x, y;
-        for(int i=0; i<25; i++) begin
-            x = i/5;  // rows
-            y = i%5;  // columns
-            temp[x][y] = s[(x + (3*y)) % 5][x];
-        end
+        
+        for(int i=0; i<25; i++) 
+            temp[i/5][i%5] = s[((i/5) + (3*(i%5))) % 5][i/5];
         return temp;
     endfunction
 
     // computing chi which is non-linear
     function automatic keccak_state_t chi(input keccak_state_t s);
         keccak_state_t temp;
-        for(int i=0; i<25; i++) begin
+        for(int i=0; i<25; i++) 
             temp[i/5][i%5] = s[i/5][i%5] ^ (~s[i/5][((i%5)+1)%5] & s[i/5][((i%5)+2)%5]);
-        end
         return temp;
     endfunction
 
     // computing iota for state matrix
     function automatic keccak_state_t iota(input keccak_state_t s, logic [63:0] round_const);
-        s[0][0] = s[0][0] ^ round_const;
-        return s;
+        keccak_state_t iota_s;
+
+        for(int i=0; i<25; i++) 
+            iota_s[i/5][i%5] = ((i/5 == 0) && (i%5 == 0)) ? (s[0][0] ^ round_const) : s[i/5][i%5];
+        return iota_s;
     endfunction
 
     always_ff@(posedge clk) begin
