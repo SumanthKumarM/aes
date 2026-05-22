@@ -13,7 +13,7 @@ $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doe
 export PYTHONPATH := $(TB_DIR):$(SIM_DIR):$(PYTHONPATH)
 
 # Cocotb setup
-COCOTB_TEST_MODULES = trng_tb
+COCOTB_TEST_MODULES = sbox_tb
 SIM = verilator
 
 # Linting Tools 
@@ -41,12 +41,16 @@ $(TRNG_PARAM_FILE): gen_param
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG)
 
-ifeq ($(block),trng)
-	BLOCK_DEPS += $(TRNG_PARAM_FILE)
-	VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
+ifneq ($(filter $(block),trng trng_sbox_top),)
+    BLOCK_DEPS += $(TRNG_PARAM_FILE)
+    VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
 endif
 
-VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
+ifeq ($(block),trng_sbox_top)
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/s_box.sv $(RTL_DIR)/$(block).sv
+else
+	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
+endif
 
 # handle specific test selection
 ifneq ($(test),)
