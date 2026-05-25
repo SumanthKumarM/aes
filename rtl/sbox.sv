@@ -1,8 +1,8 @@
 import type_defs_pkg::*;
 
-module s_box(
+module sbox(
     output state_matrix_t subBytes,  // subByte of each element of state array
-    output logic s_box_ready,  // tells trng that s-box is ready to accept random bits
+    output logic sbox_ready,  // tells trng that s-box is ready to accept random bits
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     output logic op_done,  // purely for verification purpose
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
@@ -16,8 +16,8 @@ module s_box(
     state_matrix_t masked_d_inv;  // stores inverse of denominator of every state element
     logic [3:0][3:0][15:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [3:0][3:0][15:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
-    logic [1:0] s_box_round_cntr;
-    s_box_states fsm_state;
+    logic [1:0] sbox_round_cntr;
+    sbox_states fsm_state;
     genvar i;
 
     // Multiplication in GF(2^4). Reduction polynomial is x^4 + x + 1. So reduction constant is (0011)
@@ -243,11 +243,11 @@ module s_box(
         return (b_prime_share1 ^ b_prime_share2);
     endfunction
 
-    // sequential block that assertes s_box_ready signal and computes s_box_round_cntr accordingly
+    // sequential block that assertes sbox_ready signal and computes sbox_round_cntr accordingly
     always_ff@(posedge clk) begin
         if(!rst_n) begin
-            s_box_ready <= 0;
-            s_box_round_cntr <= 0;
+            sbox_ready <= 0;
+            sbox_round_cntr <= 0;
             rst_trng <= 0;
             op_done <= 0;
             fsm_state <= TOWER_FIELD;
@@ -255,45 +255,45 @@ module s_box(
         else begin
             case(fsm_state)
                 TOWER_FIELD: begin
-                    s_box_ready <= 1;  // s-box is ready to accept random bits from TRNG
+                    sbox_ready <= 1;  // s-box is ready to accept random bits from TRNG
                     rst_trng <= 0;
                     op_done <= 0;
                     if(trng_dead_flag) fsm_state <= RESET_TRNG;
                     else fsm_state <= (trng_key_valid) ? MASKED_D : TOWER_FIELD;
                 end 
                 MASKED_D: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     rst_trng <= 0;
                     op_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                 end
                 MASKED_D_INV: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     rst_trng <= 0;
                     op_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                 end
                 MASKED_A_INV: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     rst_trng <= 0;
                     op_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                 end
                 MASKED_B_INV: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     rst_trng <= 0;
                     op_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                 end
                 SUB_BYTES: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     rst_trng <= 0;
                     op_done <= 1;  // indicates process is done so tb can start giving input
-                    s_box_round_cntr <= (s_box_round_cntr == 2) ? 0 : s_box_round_cntr + 1;  // this selects the slice of rand_num
+                    sbox_round_cntr <= (sbox_round_cntr == 2) ? 0 : sbox_round_cntr + 1;  // this selects the slice of rand_num
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
                 end
                 RESET_TRNG: begin
-                    s_box_ready <= 0;
+                    sbox_ready <= 0;
                     op_done <= 0;
                     rst_trng <= 1;  // resets TRNG as fatal failure has occurred
                     fsm_state <= TOWER_FIELD;
@@ -322,7 +322,7 @@ module s_box(
                         // initial state which receives random bits from TRNG and performs tower field inversion
                         TOWER_FIELD: begin 
                             if(trng_key_valid) begin
-                                case(s_box_round_cntr)
+                                case(sbox_round_cntr)
                                     2'b00: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     2'b01: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]}); 
                                     2'b10: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
@@ -332,7 +332,7 @@ module s_box(
                             else masked_a_byte[i/4][i%4] <= masked_a_byte[i/4][i%4];
                         end 
                         MASKED_D: begin
-                            case(s_box_round_cntr)
+                            case(sbox_round_cntr)
                                 2'b00: denominator[i/4][i%4] <= masked_denominator(masked_a_byte[i/4][i%4], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                 2'b01: denominator[i/4][i%4] <= masked_denominator(masked_a_byte[i/4][i%4], {rand_num[((28*i)+456) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
                                 2'b10: denominator[i/4][i%4] <= masked_denominator(masked_a_byte[i/4][i%4], {rand_num[((28*i)+904) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
@@ -340,7 +340,7 @@ module s_box(
                             endcase
                         end
                         MASKED_D_INV: begin
-                            case(s_box_round_cntr)
+                            case(sbox_round_cntr)
                                 2'b00: masked_d_inv[i/4][i%4] <= masked_d_inverse(denominator[i/4][i%4], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
                                 2'b01: masked_d_inv[i/4][i%4] <= masked_d_inverse(denominator[i/4][i%4], {rand_num[((28*i)+464) +: 4], rand_num[((28*i)+460) +: 4]}); 
                                 2'b10: masked_d_inv[i/4][i%4] <= masked_d_inverse(denominator[i/4][i%4], {rand_num[((28*i)+912) +: 4], rand_num[((28*i)+908) +: 4]});
@@ -348,7 +348,7 @@ module s_box(
                             endcase
                         end
                         MASKED_A_INV: begin
-                            case(s_box_round_cntr)
+                            case(sbox_round_cntr)
                                 2'b00: begin
                                     masks_of_A_inv[i/4][i%4] <= masked_A_inverse(masked_d_inv[i/4][i%4], masked_a_byte[i/4][i%4], {rand_num[((28*i)+24) +: 4], 
                                                                 rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
@@ -371,7 +371,7 @@ module s_box(
                         SUB_BYTES: subBytes[i/4][i%4] <= affine_transformation(masks_of_b_inv[i/4][i%4]);
                         default: begin  
                             if(trng_key_valid) begin
-                                case(s_box_round_cntr)
+                                case(sbox_round_cntr)
                                     2'b00: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     2'b01: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]}); 
                                     2'b10: masked_a_byte[i/4][i%4] <= tower_field(state[i/4][i%4], {rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});

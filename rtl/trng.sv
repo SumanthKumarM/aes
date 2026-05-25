@@ -5,7 +5,7 @@ module trng(
     output logic [1343:0] rand_word,  // 448-bit random packet to S-box
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
-    input logic s_box_ready,  // S-box acknowledges receipt of random words
+    input logic sbox_ready,  // S-box acknowledges receipt of random words
     input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic clk, ext_rst_n);
@@ -76,7 +76,7 @@ module trng(
 
     // keccak conditioning block (clk domain)
     keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, 
-    get_raw_entropy, s_box_ready, valid, clk, local_rst_n);
+    get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
 
     // control unit (clk domain)
     control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, 
@@ -123,7 +123,7 @@ module keccak_cond (
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
     input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
-    input logic s_box_ack,  // acknowledgement from S-Box() that it received 64 random words
+    input logic sbox_ack,  // acknowledgement from S-Box() that it received 64 random words
     input logic valid,  // from entropy collector indicating that it's ready to send the data
     input logic clk, rst_n);
     
@@ -265,7 +265,7 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    rand_word <= (s_box_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
+                    rand_word <= (sbox_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
                     key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
                     fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
                 end

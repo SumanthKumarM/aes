@@ -47,7 +47,7 @@ ifneq ($(filter $(block),trng trng_sbox_top),)
 endif
 
 ifeq ($(block),trng_sbox_top)
-	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/s_box.sv $(RTL_DIR)/$(block).sv
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
 else
 	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
 endif

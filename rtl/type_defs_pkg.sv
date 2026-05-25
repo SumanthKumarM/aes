@@ -19,5 +19,5 @@ package type_defs_pkg;
         MASKED_B_INV,
         SUB_BYTES,
         RESET_TRNG
-    } s_box_states;
+    } sbox_states;
 endpackage

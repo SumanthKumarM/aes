@@ -100,9 +100,9 @@ async def signal_monitor(dut, label=""):
         return {
             "ext_rst_n"     : int(dut.ext_rst_n.value),
             "clk"           : int(dut.clk.value),
-            "s_box_input"   : dut.s_box_input.value,
+            "sbox_input"   : dut.sbox_input.value,
             "subBytes"      : int(dut.subBytes.value),
-            "s_box_ready"   : int(dut.s_box_ready.value),
+            "sbox_ready"   : int(dut.sbox_ready.value),
             "op_done"       : int(dut.op_done.value),
             "trng_key_valid": int(dut.trng_key_valid.value),
             "dead_flag"     : int(dut.dead_flag.value),
@@ -114,7 +114,7 @@ async def signal_monitor(dut, label=""):
         """Format signal value for logging."""
         if k == "sbox_fsm":
             return SBOX_STATES.get(v, f"UNKNOWN({v})")
-        if k == "s_box_input":
+        if k == "sbox_input":
             # v is a nested list [4][4] of bytes
             try:
                 flat = [v[i][j] for i in range(4) for j in range(4)]
@@ -169,13 +169,13 @@ async def signal_monitor(dut, label=""):
             new_state = SBOX_STATES.get(cur["sbox_fsm"], "UNKNOWN")
             _mon_log.info(f"{pfx} cyc={cyc:5d}  *** [FSM] *** {old_state} -> {new_state}")
         
-        if cur["s_box_input"] != prev["s_box_input"]:
+        if cur["sbox_input"] != prev["sbox_input"]:
             try:
-                inp_bytes = [cur["s_box_input"][i][j] for i in range(4) for j in range(4)]
+                inp_bytes = [cur["sbox_input"][i][j] for i in range(4) for j in range(4)]
                 inp_str = " ".join(f"{b:02x}" for b in inp_bytes)
-                _mon_log.info(f"{pfx} cyc={cyc:5d}  *** [INPUT_CHANGE] *** s_box_input: {inp_str}")
+                _mon_log.info(f"{pfx} cyc={cyc:5d}  *** [INPUT_CHANGE] *** sbox_input: {inp_str}")
             except:
-                _mon_log.info(f"{pfx} cyc={cyc:5d}  *** [INPUT_CHANGE] *** s_box_input changed")
+                _mon_log.info(f"{pfx} cyc={cyc:5d}  *** [INPUT_CHANGE] *** sbox_input changed")
         
         prev = cur
 
@@ -260,12 +260,12 @@ async def test_sbox_single_vector(dut):
     TC1: Single test vector with INTENSIVE signal monitoring.
     
     MONITORS:
-    - ALL signal transitions (s_box_input, subBytes, op_done, FSM, etc.)
+    - ALL signal transitions (sbox_input, subBytes, op_done, FSM, etc.)
     - Input capture process (does RTL see the plaintext?)
     - Output generation (what does SBOX produce?)
     
     ISSUES THIS WILL REVEAL:
-    - If s_box_input is not being captured by RTL
+    - If sbox_input is not being captured by RTL
     - If FSM is not progressing through states
     - If op_done is not asserting
     - If output is all 0x63 (meaning all inputs treated as 0x00)
@@ -298,11 +298,11 @@ async def test_sbox_single_vector(dut):
         for j in range(4):
             state_matrix[i][j] = plaintext[i + 4*j]
 
-    dut._log.info(f"\n[STAGE 2] Driving s_box_input FROM BEGINNING (before reset)...")
+    dut._log.info(f"\n[STAGE 2] Driving sbox_input FROM BEGINNING (before reset)...")
     flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
     state_int = bytes_to_int(flat_bytes)
-    dut.s_box_input.value = state_int
-    dut._log.info(f"s_box_input = 0x{state_int:032x}")
+    dut.sbox_input.value = state_int
+    dut._log.info(f"sbox_input = 0x{state_int:032x}")
 
     # Now do reset (input already set)
     # await reset_dut(dut)
@@ -320,12 +320,12 @@ async def test_sbox_single_vector(dut):
     for i in range(5):
         await RisingEdge(dut.clk)
         try:
-            inp_bytes = [dut.s_box_input.value[i_idx][j_idx] for i_idx in range(4) for j_idx in range(4)]
+            inp_bytes = [dut.sbox_input.value[i_idx][j_idx] for i_idx in range(4) for j_idx in range(4)]
             inp_str = " ".join(f"{b:02x}" for b in inp_bytes)
         except:
-            inp_str = f"0x{int(dut.s_box_input.value):032x}"
+            inp_str = f"0x{int(dut.sbox_input.value):032x}"
         fsm = SBOX_STATES.get(int(dut.Sbox.fsm_state.value), "UNKNOWN")
-        dut._log.info(f"  Cycle {i+1}: s_box_input = {inp_str}, FSM = {fsm}")
+        dut._log.info(f"  Cycle {i+1}: sbox_input = {inp_str}, FSM = {fsm}")
     
     # Wait for op_done
     dut._log.info(f"\n[STAGE 5] Waiting for op_done...")
@@ -354,7 +354,7 @@ async def test_sbox_single_vector(dut):
         if all(b == 0x63 for b in output_bytes):
             dut._log.error("\n*** DEBUG: All outputs are 0x63 (SBOX[0x00]) ***")
             dut._log.error("This means RTL is treating ALL input bytes as 0x00")
-            dut._log.error("CHECK: Is s_box_input signal connected properly in RTL?")
+            dut._log.error("CHECK: Is sbox_input signal connected properly in RTL?")
         raise AssertionError("Test failed - check monitor logs above for signal transitions")
 
 # test case-2
@@ -399,7 +399,7 @@ async def test_sbox_pipelined(dut):
     state_int = bytes_to_int(flat_bytes)
     
     dut._log.info(f"\n[STAGE 2] Driving first plaintext ({test_vectors[0][0]})...")
-    dut.s_box_input.value = state_int
+    dut.sbox_input.value = state_int
     
     # Reset
     await reset_dut(dut)
@@ -446,7 +446,7 @@ async def test_sbox_pipelined(dut):
                     state_matrix[i][j] = plaintext_next[i + 4*j]
             flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
             state_int = bytes_to_int(flat_bytes)
-            dut.s_box_input.value = state_int
+            dut.sbox_input.value = state_int
             dut._log.info(f"  Vector {vec_idx + 1}: Input driven")
             await RisingEdge(dut.clk)
     
@@ -487,7 +487,7 @@ async def test_sbox_edge_cases(dut):
             state_matrix[i][j] = plaintext[i + 4*j]
     flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
     state_int = bytes_to_int(flat_bytes)
-    dut.s_box_input.value = state_int
+    dut.sbox_input.value = state_int
     
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC3"))
@@ -522,7 +522,7 @@ async def test_sbox_edge_cases(dut):
                     state_matrix[i][j] = plaintext[i + 4*j]
             flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
             state_int = bytes_to_int(flat_bytes)
-            dut.s_box_input.value = state_int
+            dut.sbox_input.value = state_int
             await RisingEdge(dut.clk)
     
     dut._log.info(f"\n✓ TC3 PASSED - All {len(edge_cases)} edge cases verified")
@@ -560,7 +560,7 @@ async def test_sbox_stress(dut):
             state_matrix[i][j] = plaintext[i + 4*j]
     flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
     state_int = bytes_to_int(flat_bytes)
-    dut.s_box_input.value = state_int
+    dut.sbox_input.value = state_int
     
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC4"))
@@ -596,7 +596,7 @@ async def test_sbox_stress(dut):
                     state_matrix[i][j] = plaintext_next[i + 4*j]
             flat_bytes = [state_matrix[i][j] for i in range(4) for j in range(4)]
             state_int = bytes_to_int(flat_bytes)
-            dut.s_box_input.value = state_int
+            dut.sbox_input.value = state_int
             await RisingEdge(dut.clk)
     
     dut._log.info(f"\n✓ TC4 PASSED - All {n_vectors} random vectors verified")

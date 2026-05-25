@@ -151,7 +151,7 @@ async def signal_monitor(dut, label=""):
 
     Signal coverage
     ---------------
-    Top ports : ext_rst_n, raw_rand_bit, s_box_ack, key_ready_req,
+    Top ports : ext_rst_n, raw_rand_bit, sbox_ack, key_ready_req,
                 dead_flag, rand_word
     CU        : fsm_state, noise_src_enb_n, enb_health_tests,
                 get_raw_entropy, local_rst_n, drbg_cntr
@@ -165,7 +165,7 @@ async def signal_monitor(dut, label=""):
         return {
             "ext_rst_n"   : int(dut.ext_rst_n.value),
             "raw_bit"     : int(dut.raw_rand_bit.value),
-            "s_box_ack"   : int(dut.s_box_ack.value),
+            "sbox_ack"   : int(dut.sbox_ack.value),
             "key_rdy_req" : int(dut.key_ready_req.value),
             "dead_flag"   : int(dut.dead_flag.value),
             "rand_word"   : int(dut.rand_word.value),
@@ -221,7 +221,7 @@ def start_clocks(dut):
 
 async def reset_dut(dut):
     dut.ext_rst_n.value    = 0
-    dut.s_box_ack.value    = 0
+    dut.sbox_ack.value    = 0
     dut.raw_rand_bit.value = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
     dut.ext_rst_n.value = 1
@@ -240,9 +240,9 @@ async def wait_signal(signal, value=1, timeout=50_000, clk=None):
 async def ack_all_words(dut, n=KECCAK_OUTPUT_WORDS):
     """Send n ACK pulses to drain SQUEEZ without reading word values."""
     for _ in range(n):
-        dut.s_box_ack.value = 1
+        dut.sbox_ack.value = 1
         await RisingEdge(dut.clk)
-        dut.s_box_ack.value = 0
+        dut.sbox_ack.value = 0
         await RisingEdge(dut.clk)
 
 
@@ -267,9 +267,9 @@ async def wait_and_collect_words(dut, n=KECCAK_OUTPUT_WORDS, timeout=30_000):
 
     # Words[1..n-1]: ACK -> 2 cycles settle -> read
     for i in range(1, n):
-        dut.s_box_ack.value = 1
+        dut.sbox_ack.value = 1
         await RisingEdge(dut.clk)   # word_tx_cntr -> i
-        dut.s_box_ack.value = 0
+        dut.sbox_ack.value = 0
         await RisingEdge(dut.clk)   # word_tx_cntr registered
         await RisingEdge(dut.clk)   # rand_word updated to slice[i]
         wtx = int(dut.keccak.word_tx_cntr.value)
@@ -278,9 +278,9 @@ async def wait_and_collect_words(dut, n=KECCAK_OUTPUT_WORDS, timeout=30_000):
         words.append(rw)
 
     # Final ACK: word_tx_cntr -> n, clears key_ready_req, FSM -> ABSORB
-    dut.s_box_ack.value = 1
+    dut.sbox_ack.value = 1
     await RisingEdge(dut.clk)
-    dut.s_box_ack.value = 0
+    dut.sbox_ack.value = 0
     await RisingEdge(dut.clk)
 
     return words
@@ -555,7 +555,7 @@ async def cdc_lat_test(dut):
 
     dut.ext_rst_n.value    = 0
     dut.raw_rand_bit.value = 1
-    dut.s_box_ack.value    = 0
+    dut.sbox_ack.value    = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
 
     assert int(dut.rand_bit_sync1.value) == 0, "sync1 must be 0 during reset"
