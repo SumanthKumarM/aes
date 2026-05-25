@@ -5,7 +5,7 @@ module trng(
     output logic [1343:0] rand_word,  // 448-bit random packet to S-box
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
-    input logic s_box_ready,  // S-box acknowledges receipt of random words
+    input logic sbox_ready,  // S-box acknowledges receipt of random words
     input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic clk, ext_rst_n);
@@ -76,7 +76,7 @@ module trng(
 
     // keccak conditioning block (clk domain)
     keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, 
-    get_raw_entropy, s_box_ready, valid, clk, local_rst_n);
+    get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
 
     // control unit (clk domain)
     control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, 
@@ -123,7 +123,7 @@ module keccak_cond (
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
     input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
-    input logic s_box_ack,  // acknowledgement from S-Box() that it received 64 random words
+    input logic sbox_ack,  // acknowledgement from S-Box() that it received 64 random words
     input logic valid,  // from entropy collector indicating that it's ready to send the data
     input logic clk, rst_n);
     
@@ -167,40 +167,40 @@ module keccak_cond (
     function automatic keccak_state_t rho(input keccak_state_t s);
         int n;
         logic [63:0] lane;
+        keccak_state_t rot_s;
 
         for(int i=0; i<25; i++) begin
             n = RHO_OFFSETS[i/5][i%5];
             lane = s[i/5][i%5];
-            s[i/5][i%5] = (n == 0) ? lane : ((lane << n) | (lane >> (64 - n)));
+            rot_s[i/5][i%5] = (n == 0) ? lane : ((lane << n) | (lane >> (64 - n)));
         end
-        return s;
+        return rot_s;
     endfunction
 
     // computing pi for state matrix
     function automatic keccak_state_t pi(input keccak_state_t s);
         keccak_state_t temp;
-        int x, y;
-        for(int i=0; i<25; i++) begin
-            x = i/5;  // rows
-            y = i%5;  // columns
-            temp[x][y] = s[(x + (3*y)) % 5][x];
-        end
+        
+        for(int i=0; i<25; i++) 
+            temp[i/5][i%5] = s[((i/5) + (3*(i%5))) % 5][i/5];
         return temp;
     endfunction
 
     // computing chi which is non-linear
     function automatic keccak_state_t chi(input keccak_state_t s);
         keccak_state_t temp;
-        for(int i=0; i<25; i++) begin
+        for(int i=0; i<25; i++) 
             temp[i/5][i%5] = s[i/5][i%5] ^ (~s[i/5][((i%5)+1)%5] & s[i/5][((i%5)+2)%5]);
-        end
         return temp;
     endfunction
 
     // computing iota for state matrix
     function automatic keccak_state_t iota(input keccak_state_t s, logic [63:0] round_const);
-        s[0][0] = s[0][0] ^ round_const;
-        return s;
+        keccak_state_t iota_s;
+
+        for(int i=0; i<25; i++) 
+            iota_s[i/5][i%5] = ((i/5 == 0) && (i%5 == 0)) ? (s[0][0] ^ round_const) : s[i/5][i%5];
+        return iota_s;
     endfunction
 
     always_ff@(posedge clk) begin
@@ -219,7 +219,6 @@ module keccak_cond (
                 ABSORB: begin
                     key_ready_req <= 0;
                     round_cntr <= 0;
-                    rand_word <= rand_word;
 
                     // initial stage: round-0
                     // state[191:0]     = true noise source entropy / feedback
@@ -266,7 +265,7 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    rand_word <= (s_box_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
+                    rand_word <= (sbox_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
                     key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
                     fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
                 end
@@ -397,7 +396,6 @@ module control_unit(
                 end 
                 BIST: begin
                     local_rst_n <= 1;
-                    drbg_cntr <= drbg_cntr;
 
                     // enabling blocks
                     noise_src_enb_n <= 0;
@@ -416,12 +414,6 @@ module control_unit(
                     endcase
                 end
                 WAIT_FOR_XFER: begin
-                    // holding their previous state
-                    noise_src_enb_n <= noise_src_enb_n;
-                    enb_health_tests <= enb_health_tests;
-                    local_rst_n <= local_rst_n;
-                    dead_flag <= dead_flag;
-                    err_state_delay <= err_state_delay;
                     get_raw_entropy <= 0;  // no entropy collection when waiting for acknowledgement
 
                     // Increment exactly once per completed key transfer
@@ -441,12 +433,6 @@ module control_unit(
                     // resets noise source, entropy collector and Keccak conditioning block 
                     // since they gave psuedo randomness instead of true randomness
                     local_rst_n <= 0;
-
-                    // holding their previous state
-                    noise_src_enb_n <= noise_src_enb_n;
-                    enb_health_tests <= enb_health_tests;
-                    get_raw_entropy <= get_raw_entropy;
-                    dead_flag <= dead_flag;
                     drbg_cntr <= 0;  // resetting this so that Keccak block can start using raw entropy instead of DRBG feedback
 
                     err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
