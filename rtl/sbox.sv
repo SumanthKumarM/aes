@@ -10,7 +10,7 @@ module sbox #(
     input logic [RAND_NUM_WIDTH-1:0] rand_num,  // random bits from TRNG
     input logic rst_n, clk);  
 
-    localparam NUM_BYTES = (DATA_WIDTH == 128) ? 16 : 1;  // used to decide iterations in generate block
+    localparam int NUM_BYTES = (DATA_WIDTH == 128) ? 16 : 1;  // used to decide iterations in generate block
 
     logic [DATA_WIDTH-1:0] masked_a_byte; // to store a1 and a0
     logic [DATA_WIDTH-1:0] denominator;  // stores denominator value corresponding to every state element
@@ -345,37 +345,29 @@ module sbox #(
                                 case(sbox_round_cntr)
                                     2'b00: begin
                                         masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                                    rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                                                                        rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     end 
                                     2'b01: begin
                                         masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+472) +: 4], 
-                                                                    rand_num[((28*i)+468) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
+                                                                        rand_num[((28*i)+468) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
                                     end
                                     2'b10: begin
                                         masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+920) +: 4], 
-                                                                    rand_num[((28*i)+916) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
+                                                                        rand_num[((28*i)+916) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
                                     end
                                     default: begin
                                         masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                                    rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                                                                        rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                                     end 
                                 endcase
                             end
                             else begin
                                 masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                               rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                                                                rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                             end
                         end
                         MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
                         SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
-                        RESET_TRNG: begin
-                            masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
-                            denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
-                            masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
-                            masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
-                            masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
-                            subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
-                        end
                         default: begin 
                             if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
                                 case(sbox_round_cntr)
