@@ -1,8 +1,22 @@
+/**
+ * This TRNG block is designed to output 1680 random bits so that CIPHER block can consume it
+ * CIPHER block internally has 2 Sbox's, one Sbox converts whole state matrix and produces subBytes 
+   for each element in state matrix. This Sbox consumes 448 random bits (28 random bits per byte)
+ * Another Sbox is used in AddRoundKey for keyExpansion logic where Sbox converts a word (32-bits) and
+   produces subBytes for them. This Sbox consumes 112 random bits.
+ * Each round in CIPHER invokes Sbox twice when KEY size is either 128 or 256 bits but CIPHER invokes Sbox
+   only once per round only when (i%6=0) is met. So the CIPHER consumes 560 random bits per round at max
+ * This TRNG can output 1680 random bits so it can accommodate 3 CIPHER rounds. While CIPHER works for 
+   3 rounds, TRNG meanwhile computes next batch of 1680 random bits. 
+ * So using this mechanism both TRNG and CIPHER work in a pipelined fashion to ensure maximum through-put
+   is acheieved using this design implementation 
+**/
+
 import trng_param_pkg::*;
 import type_defs_pkg::*;
 
 module trng(
-    output logic [1343:0] rand_word,  // 448-bit random packet to S-box
+    output logic [1679:0] rand_word,  // 1680-bit random packet to CIPHER block
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
     input logic sbox_ready,  // S-box acknowledges receipt of random words
@@ -118,7 +132,7 @@ endmodule
 
 // Keccak conditioning block
 module keccak_cond (
-    output logic [1343:0] rand_word,  // 1344 random bits needed for S-Box()
+    output logic [1679:0] rand_word,  // 1680 random bits needed for CIPHER
     output logic ready,  // indicates entropy collector that this block isi ready to accecpt raw entropy
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
@@ -132,6 +146,8 @@ module keccak_cond (
     logic [4:0] round_cntr;  // keeps track of number of rounds
     logic [1:0] rx_cntr;  // keeps track of handshakes
     Keccak_states fsm_state;  
+    logic [1599:0] squeeze_buff;  // stores data temporarily until SQUEEZE enters 2nd cycle
+    logic squeeze_done;  // used to extend SQUEEZE state by another cycle
 
     // flattening state matrix to access slices of it
     logic [1599:0] state_flat;
@@ -209,6 +225,8 @@ module keccak_cond (
             rand_word <= 0;
             state <= 0;
             temp_entropy <= 0;
+            squeeze_buff <= 0;
+            squeeze_done <= 0;
             round_cntr <= 0;
             rx_cntr <= 0;
             ready <= 0;
@@ -258,16 +276,32 @@ module keccak_cond (
                     ready <= 0;
                     rx_cntr <= 0;
                     key_ready_req <= 0;
-                    fsm_state <= (round_cntr == 23) ? SQUEEZ : PERMUTE;
+                    fsm_state <= (round_cntr == 23) ? SQUEEZE : PERMUTE;
                 end
-                SQUEEZ: begin
-                    temp_entropy <= state[0][2:0];
+                SQUEEZE: begin
                     ready <= 0;
                     rx_cntr <= 0;
 
-                    rand_word <= (sbox_ack) ? state_flat[1343:0] : rand_word;  // giving s-box all 1344 random bits 
-                    key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
-                    fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
+                    if(!squeeze_done) begin
+                        squeeze_buff <= state_flat;
+                        squeeze_done <= 1;
+                        temp_entropy <= state[0][2:0];  // capturing slice of state that went through all 24 permutation rounds
+
+                        // re-computing Keccak state by running single round so to get unique and fresh random bits
+                        // which gets concatenated with 1600 random bits to give final 1680 random bits
+                        state <= iota(chi(pi(rho(theta(state)))), KECCAK_RC[0]);
+                        fsm_state <= SQUEEZE;
+                    end 
+                    else begin
+                        key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
+
+                        if(sbox_ack) begin
+                            rand_word <= {state_flat[79:0], squeeze_buff};
+                            fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
+                            squeeze_done <= 0;  // resetting it again for next batch
+                        end
+                        else fsm_state <= SQUEEZE;
+                    end 
                 end
                 default: fsm_state <= ABSORB;
             endcase

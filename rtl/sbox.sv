@@ -1,8 +1,14 @@
+/**
+ * This Sbox module is parameterized to work with whole state matric and with a single word (32-bits) itself
+ * The reason this block is parameterized is AddRoundKey also uses this Sbox to compute subBytes of word in KeyExpansion logic
+ * Sbox needs 448 bits if random bits when it's operating on whole state matrix because each byte uses 28 random bits. 
+ * When operating on word it only needs 112 random bits. So random number input port is also parameterized accordingly
+**/
+
 import type_defs_pkg::*;
 
 module sbox #(
-    parameter int DATA_WIDTH = 128,
-    parameter int RAND_NUM_WIDTH = (DATA_WIDTH == 128) ? 1344 : 28)( 
+    parameter int DATA_WIDTH = 128)( 
     output logic [DATA_WIDTH-1:0] subBytes,  // subByte of each element of state array
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
@@ -10,14 +16,14 @@ module sbox #(
     input logic [RAND_NUM_WIDTH-1:0] rand_num,  // random bits from TRNG
     input logic rst_n, clk);  
 
-    localparam int NUM_BYTES = (DATA_WIDTH == 128) ? 16 : 1;  // used to decide iterations in generate block
+    localparam int NUM_BYTES = (DATA_WIDTH == 128) ? 16 : 4;  // used to decide iterations in generate block
+    localparam int RAND_NUM_WIDTH = (DATA_WIDTH == 128) ? 1344 : 112  // input random number width
 
     logic [DATA_WIDTH-1:0] masked_a_byte; // to store a1 and a0
     logic [DATA_WIDTH-1:0] denominator;  // stores denominator value corresponding to every state element
     logic [DATA_WIDTH-1:0] masked_d_inv;  // stores inverse of denominator of every state element
     logic [(2*DATA_WIDTH)-1:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [(2*DATA_WIDTH)-1:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
-    logic [1:0] sbox_round_cntr;
     sbox_states fsm_state;
     genvar i;
 
@@ -241,10 +247,9 @@ module sbox #(
         return (b_prime_share1 ^ b_prime_share2);
     endfunction
 
-    // sequential block computes sbox_round_cntr and sets rst_trng accordingly
+    // separate sequental block is used to update FSM states and rst_trng so as to avoid being driven for multiple times
     always_ff@(posedge clk) begin
         if(!rst_n) begin
-            if(NUM_BYTES != 1) sbox_round_cntr <= 0;
             rst_trng <= 0;
             fsm_state <= TOWER_FIELD;
         end
@@ -252,36 +257,29 @@ module sbox #(
             case(fsm_state)
                 TOWER_FIELD: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     fsm_state <= (trng_key_valid) ? RESET_TRNG : MASKED_D;
                 end 
                 MASKED_D: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                 end
                 MASKED_D_INV: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                 end
                 MASKED_A_INV: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                 end
                 MASKED_B_INV: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                 end
                 SUB_BYTES: begin
                     rst_trng <= 0;
-                    if(NUM_BYTES != 1) sbox_round_cntr <= (sbox_round_cntr == 2) ? 0 : sbox_round_cntr + 1;  // this selects the slice of rand_num
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
                 end
                 RESET_TRNG: begin
-                    if(NUM_BYTES != 1) sbox_round_cntr <= sbox_round_cntr;
                     rst_trng <= 1;  // resets TRNG as fatal failure has occurred
                     fsm_state <= TOWER_FIELD;
                 end
@@ -307,78 +305,14 @@ module sbox #(
                     // can be >= worst individual sub block's critical path delay instead of sum of delays of all sub blocks
                     case(fsm_state)
                         // initial state which receives random bits from TRNG and performs tower field inversion
-                        TOWER_FIELD: begin 
-                            if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
-                                case(sbox_round_cntr)
-                                    2'b00: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                    2'b01: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]}); 
-                                    2'b10: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
-                                    default: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                endcase
-                            end
-                            else masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        end 
-                        MASKED_D: begin
-                            if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
-                                case(sbox_round_cntr)
-                                    2'b00: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                    2'b01: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+456) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
-                                    2'b10: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+904) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
-                                    default: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                endcase
-                            end
-                            else denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        end
-                        MASKED_D_INV: begin
-                            if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
-                                case(sbox_round_cntr)
-                                    2'b00: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
-                                    2'b01: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+464) +: 4], rand_num[((28*i)+460) +: 4]}); 
-                                    2'b10: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+912) +: 4], rand_num[((28*i)+908) +: 4]});
-                                    default: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]}); 
-                                endcase
-                            end
-                            else masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
-                        end
-                        MASKED_A_INV: begin
-                            if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
-                                case(sbox_round_cntr)
-                                    2'b00: begin
-                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                                        rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                    end 
-                                    2'b01: begin
-                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+472) +: 4], 
-                                                                        rand_num[((28*i)+468) +: 4], rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]});
-                                    end
-                                    2'b10: begin
-                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+920) +: 4], 
-                                                                        rand_num[((28*i)+916) +: 4], rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
-                                    end
-                                    default: begin
-                                        masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                                        rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                    end 
-                                endcase
-                            end
-                            else begin
-                                masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
-                                                                rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                            end
-                        end
+                        TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                        MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                        MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
+                        MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], 
+                                                                      rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                         MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
                         SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
-                        default: begin 
-                            if(NUM_BYTES != 1) begin  // counter based slicing is not needed when subButes() is applied on 1 byte
-                                case(sbox_round_cntr)
-                                    2'b00: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                    2'b01: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+452) +: 4], rand_num[((28*i)+448) +: 4]}); 
-                                    2'b10: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+900) +: 4], rand_num[((28*i)+896) +: 4]});
-                                    default: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                                endcase
-                            end
-                            else masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        end 
+                        default: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
                     endcase
                 end
             end
