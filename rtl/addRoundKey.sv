@@ -73,9 +73,21 @@ module addRoundKey(
     endfunction
 
     // optimized division function based on KEY size
-    function automatic unibble div_Nk(input logic [5:0] idx);
-        ;
-        
+    function automatic unibble div_Nk(input logic [5:0] idx, input unibble Nk);
+        unibble div_res;
+
+        case(Nk)
+            4'h4: div_res = idx >> 2;  // idx/4
+            4'h6: begin  // idx/6
+                div_res[0] = idx[1];
+                div_res[1] = idx[2] ^ idx[1];
+                div_res[2] = (idx[5] & ~idx[4]) | (~idx[5] & idx[4] & idx[3]);
+                div_res[3] = idx[5] & idx[4];
+            end
+            4'h8: div_res = idx >> 3;  // idx/8
+            default: div_res = 0;
+        endcase
+        return div_res;
     endfunction
 
     // optimized (num + 1) function
@@ -143,23 +155,21 @@ module addRoundKey(
                         idx[2] <= add_1(add_1(round_cntr << 2));  // i = (round * 4) + 2
                         idx[3] <= add_1(add_1(add_1(round_cntr << 2)));  // i = (round * 4) + 3
 
-                        // since idx[1] and idx[3] are always odd, checking if(i % Nk = 0) for these indices is not needed. they always satisfy i % Nk != 0 since Nk is even (4)
-                        {expKey[3][idx[1]], expKey[2][idx[1]], expKey[1][idx[1]], expKey[0][idx[1]]} <= {expKey[3][idx[1]-4], expKey[2][idx[1]-4], expKey[1][idx[1]-4], expKey[0][idx[1]-4]}
-                                                                                                        ^ {expKey[3][idx[1]-1], expKey[2][idx[1]-1], expKey[1][idx[1]-1], expKey[0][idx[1]]-1};
-                        {expKey[3][idx[3]], expKey[2][idx[3]], expKey[1][idx[3]], expKey[0][idx[3]]} <= {expKey[3][idx[3]-4], expKey[2][idx[3]-4], expKey[1][idx[3]-4], expKey[0][idx[3]-4]}
-                                                                                                        ^ {expKey[3][idx[3]-1], expKey[2][idx[3]-1], expKey[1][idx[3]-1], expKey[0][idx[3]]-1};
-                        
-                        // since idx[0] and idx[2] are always even they might satisfy i % Nk = 0. so these indices need checking and based on that expanded KEYs are computed
-                        if(mod_Nk(idx[0], key_size)) begin  // since condition is met, special transformation is applied
-                            sbox_state <= rotWord({expKey[3][idx[0]-1], expKey[2][idx[0]-1], expKey[1][idx[0]-1], expKey[0][idx[0]]-1});  // loading Sbox input
-                            {expKey[3][idx[0]], expKey[2][idx[0]], expKey[1][idx[0]], expKey[0][idx[0]]} <= {expKey[3][idx[0]-4], expKey[2][idx[0]-4], expKey[1][idx[0]-4], expKey[0][idx[0]-4]}
-                                ^ subByte ^ RCON[idx[0]/4];
+                        for(int i=0; i<4; i++) begin
+                            if(i%2 == 0) begin  // since idx[0] and idx[2] are always even they might satisfy i % Nk = 0. so these indices need checking and based on that expanded KEYs are computed
+                                if(mod_Nk(idx[i], key_size)) begin  // since condition is met, special transformation is applied
+                                    sbox_state <= rotWord({expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1});  // loading Sbox input
+                                    {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
+                                                                                                                    ^ subByte ^ RCON[div_Nk(idx[i], 4)];
+                                end
+                                else
+                                    {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
+                                                                                                        ^ {expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1};
+                            end
+                            else  // since idx[1] and idx[3] are always odd, checking if(i % Nk = 0) for these indices is not needed. they always satisfy i % Nk != 0 since Nk is even (4)
+                                {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
+                                                                                                                ^ {expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1};
                         end
-                        else
-                            {expKey[3][idx[0]], expKey[2][idx[0]], expKey[1][idx[0]], expKey[0][idx[0]]} <= {expKey[3][idx[0]-4], expKey[2][idx[0]-4], expKey[1][idx[0]-4], expKey[0][idx[0]-4]}
-                                                                                                        ^ {expKey[3][idx[0]-1], expKey[2][idx[0]-1], expKey[1][idx[0]-1], expKey[0][idx[0]]-1};
-
-
                     end
 
                     round_cntr <= (round_cntr == 4'hA) ? 0 : round_cntr + 1;  // this key size only requires 11 rounds in total
