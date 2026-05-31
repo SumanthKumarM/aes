@@ -77,14 +77,14 @@ module addRoundKey(
         unibble div_res;
 
         case(Nk)
-            4'h4: div_res = idx >> 2;  // idx/4
+            4'h4: div_res = idx[5:2];  // idx >> 2 or idx/4
             4'h6: begin  // idx/6
                 div_res[0] = idx[1];
                 div_res[1] = idx[2] ^ idx[1];
                 div_res[2] = (idx[5] & ~idx[4]) | (~idx[5] & idx[4] & idx[3]);
                 div_res[3] = idx[5] & idx[4];
             end
-            4'h8: div_res = idx >> 3;  // idx/8
+            4'h8: div_res = {1'b0, idx[5:3]};  // idx >> 3 or idx/8
             default: div_res = 0;
         endcase
         return div_res;
