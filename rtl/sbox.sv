@@ -10,6 +10,7 @@ import type_defs_pkg::*;
 module sbox #(
     parameter int DATA_WIDTH = 128)( 
     output logic [DATA_WIDTH-1:0] subBytes,  // subByte of each element of state array
+    output logic sbox_done,  // indicates that Sbox has computed required subBytes
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
     input logic [DATA_WIDTH-1:0] state,  // 128-bit input state matrix to s-box
@@ -247,40 +248,48 @@ module sbox #(
         return (b_prime_share1 ^ b_prime_share2);
     endfunction
 
-    // separate sequental block is used to update FSM states and rst_trng so as to avoid being driven for multiple times
+    // separate sequental block is used to update FSM states, sbox_done and rst_trng so as to avoid being driven for multiple times
     always_ff@(posedge clk) begin
         if(!rst_n) begin
             rst_trng <= 0;
+            sbox_done <= 0;
             fsm_state <= TOWER_FIELD;
         end
         else begin
             case(fsm_state)
                 TOWER_FIELD: begin
                     rst_trng <= 0;
+                    sbox_done <= 0;
                     fsm_state <= (trng_key_valid) ? RESET_TRNG : MASKED_D;
                 end 
                 MASKED_D: begin
                     rst_trng <= 0;
+                    sbox_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                 end
                 MASKED_D_INV: begin
                     rst_trng <= 0;
+                    sbox_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                 end
                 MASKED_A_INV: begin
                     rst_trng <= 0;
+                    sbox_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                 end
                 MASKED_B_INV: begin
                     rst_trng <= 0;
+                    sbox_done <= 0;
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                 end
                 SUB_BYTES: begin
                     rst_trng <= 0;
+                    sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
                     fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
                 end
                 RESET_TRNG: begin
                     rst_trng <= 1;  // resets TRNG as fatal failure has occurred
+                    sbox_done <= 0;
                     fsm_state <= TOWER_FIELD;
                 end
                 default: fsm_state <= TOWER_FIELD;

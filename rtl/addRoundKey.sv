@@ -8,6 +8,7 @@ import type_defs_pkg::*;
 module addRoundKey( 
     output state_matrix_t addRoundKeyOut,  // output of addRoundKey
     output logic rst_trng,  // output from sbox that resets TRNG when fatal error occurs in TRNG
+    input state_matrix_t state,  // input state matrix
     input logic [255:0] master_key,  // input master KEY
     input logic [112:0] rand_num,  // random bits from TRNG for sbox
     input logic trng_dead_flag,  // input to sbox from TRNG to indicate that TRNG has some fatal error
@@ -34,9 +35,11 @@ module addRoundKey(
     logic [3:0][5:0] idx;  // keeps track of word number
     word_t subByte, sbox_state;  // input and outputs of sbox
     state_matrix_t expKey;  // expanded KEYs by KeyExpansion logic
+    logic sbox_done;  // addRoundKey can know when Sbox is done with computing necessary subBytes
+    logic sbox_done_delayed;  // delayed version of sbox_done for addRoundKeyOut purpose
 
     // sbox that gives subBytes used when i % Nk = 0 in KeyExpansion
-    sbox#(32) Sbox(subByte, rst_trng, trng_dead_flag, sbox_state, rand_num, rst_n, clk);
+    sbox#(32) Sbox(subByte, sbox_done, rst_trng, trng_dead_flag, sbox_state, rand_num, rst_n, clk);
 
     // optimized modulus function, based on key_size corresponding modulus is performed
     // key_size = 00 - 128-bit KEY - so mod 4 is performed
@@ -122,6 +125,7 @@ module addRoundKey(
             round_cntr <= 4'h0;
             sbox_state <= 0;
             subByte <= 0;
+            sbox_done_delayed <= 0;
             for(int i=0; i<16; i++) begin 
                 addRoundKeyOut[i/4][i%4] <= 8'h00;
                 expKey[i/4][i%4] <= 8'h00;  
@@ -137,6 +141,8 @@ module addRoundKey(
             endcase
         end
         else begin
+            sbox_done_delayed <= sbox_done;  // delaying sbox_done by one cycle
+
             case(key_size)
                 2'b00: begin
                     if(round_cntr == 0) begin
@@ -145,30 +151,41 @@ module addRoundKey(
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} <= master_key[(32*i) +: 32];
 
                             // adding round KEY for round-0
-                            {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= 
-                            {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} ^ master_key[(32*i) +: 32];
+                            {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ master_key[(32*i) +: 32];
                         end
                     end
                     else begin
-                        idx[0] <= (round_cntr << 2);  // i = round * 4
-                        idx[1] <= add_1(round_cntr << 2);  // i = (round * 4) + 1
-                        idx[2] <= add_1(add_1(round_cntr << 2));  // i = (round * 4) + 2
-                        idx[3] <= add_1(add_1(add_1(round_cntr << 2)));  // i = (round * 4) + 3
+                        idx[0] <= {2'b00, (round_cntr << 2)};  // i = round * 4
+                        idx[1] <= {2'b00, add_1(round_cntr << 2)};  // i = (round * 4) + 1
+                        idx[2] <= {2'b00, add_1(add_1(round_cntr << 2))};  // i = (round * 4) + 2
+                        idx[3] <= {2'b00, add_1(add_1(add_1(round_cntr << 2)))};  // i = (round * 4) + 3
 
-                        for(int i=0; i<4; i++) begin
+                        for(int i=0; i<4; i++) begin  // Key Expansion logic
                             if(i%2 == 0) begin  // since idx[0] and idx[2] are always even they might satisfy i % Nk = 0. so these indices need checking and based on that expanded KEYs are computed
                                 if(mod_Nk(idx[i], key_size)) begin  // since condition is met, special transformation is applied
                                     sbox_state <= rotWord({expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1});  // loading Sbox input
-                                    {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
-                                                                                                                    ^ subByte ^ RCON[div_Nk(idx[i], 4)];
+
+                                    if(sbox_done)  // keyExpansion can be done now since Sbox has given required subBytes
+                                        {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
+                                                                                                                        ^ subByte ^ RCON[div_Nk(idx[i], 4)];
+                                    else  // Sbox still hasn't computed required subBytes
+                                        {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]};
                                 end
                                 else
                                     {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
-                                                                                                        ^ {expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1};
+                                                                                                                    ^ {expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1};
                             end
                             else  // since idx[1] and idx[3] are always odd, checking if(i % Nk = 0) for these indices is not needed. they always satisfy i % Nk != 0 since Nk is even (4)
                                 {expKey[3][idx[i]], expKey[2][idx[i]], expKey[1][idx[i]], expKey[0][idx[i]]} <= {expKey[3][idx[i]-4], expKey[2][idx[i]-4], expKey[1][idx[i]-4], expKey[0][idx[i]-4]}
                                                                                                                 ^ {expKey[3][idx[i]-1], expKey[2][idx[i]-1], expKey[1][idx[i]-1], expKey[0][idx[i]]-1};
+
+                            // among the 4 expanded keys, the key that's going to consume more cycles is the one which uses Sbox because Sbox takes 6 cycles to compute subBytes
+                            // so waiting until delayed version of sbox_done ensures that expKey actually got updated so addRoundKeyOut can use it
+                            for(int i=0; i<4; i++) begin  // Add Round Key logic
+                                if(sbox_done_delayed)  
+                                    {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
+                                else {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+                            end
                         end
                     end
 
