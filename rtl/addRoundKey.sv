@@ -58,6 +58,7 @@ module addRoundKey(
                 if(!idx[0]) begin 
                     sum_even_pos = {(idx[4] & idx[2]), (idx[4] ^ idx[2])};  // half adder logic
                     sum_odd_pos = {((idx[5] & idx[3]) | (idx[1] & (idx[5] ^ idx[3]))), (idx[5] ^ idx[3] ^ idx[1])};  // full adder logic
+                    
                     // since sum_even_pos can never have 2'b11 value, it is enough to check if sum_odd_pos = 2'b11 and sum_even_pos = 2'b00
                     // other than this condition, both sums being same also mean it is divisible by 3
                     is_div_by_3 = ((sum_even_pos == sum_odd_pos) || (sum_even_pos == 2'b00 && sum_odd_pos == 2'b11)) ? 1 : 0;
