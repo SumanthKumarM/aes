@@ -15,7 +15,7 @@ module sbox #(
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
     input logic [DATA_WIDTH-1:0] state,  // 128-bit input state matrix to s-box
     input logic [RAND_NUM_WIDTH-1:0] rand_num,  // random bits from TRNG
-    input logic rst_n, clk);  
+    input logic enb_n, rst_n, clk);  
 
     localparam int NUM_BYTES = (DATA_WIDTH == 128) ? 16 : 4;  // used to decide iterations in generate block
     localparam int RAND_NUM_WIDTH = (DATA_WIDTH == 128) ? 1344 : 112  // input random number width
@@ -256,44 +256,51 @@ module sbox #(
             fsm_state <= TOWER_FIELD;
         end
         else begin
-            case(fsm_state)
-                TOWER_FIELD: begin
-                    rst_trng <= 0;
-                    sbox_done <= 0;
-                    fsm_state <= (trng_key_valid) ? RESET_TRNG : MASKED_D;
-                end 
-                MASKED_D: begin
-                    rst_trng <= 0;
-                    sbox_done <= 0;
-                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
-                end
-                MASKED_D_INV: begin
-                    rst_trng <= 0;
-                    sbox_done <= 0;
-                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
-                end
-                MASKED_A_INV: begin
-                    rst_trng <= 0;
-                    sbox_done <= 0;
-                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
-                end
-                MASKED_B_INV: begin
-                    rst_trng <= 0;
-                    sbox_done <= 0;
-                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
-                end
-                SUB_BYTES: begin
-                    rst_trng <= 0;
-                    sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
-                    fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
-                end
-                RESET_TRNG: begin
-                    rst_trng <= 1;  // resets TRNG as fatal failure has occurred
-                    sbox_done <= 0;
-                    fsm_state <= TOWER_FIELD;
-                end
-                default: fsm_state <= TOWER_FIELD;
-            endcase
+            if(!enb_n) begin  // since Sbox is enable it will continue to operate
+                case(fsm_state)
+                    TOWER_FIELD: begin
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_key_valid) ? RESET_TRNG : MASKED_D;
+                    end 
+                    MASKED_D: begin
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
+                    end
+                    MASKED_D_INV: begin
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
+                    end
+                    MASKED_A_INV: begin
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
+                    end
+                    MASKED_B_INV: begin
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
+                    end
+                    SUB_BYTES: begin
+                        rst_trng <= 0;
+                        sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
+                    end
+                    RESET_TRNG: begin
+                        rst_trng <= 1;  // resets TRNG as fatal failure has occurred
+                        sbox_done <= 0;
+                        fsm_state <= TOWER_FIELD;
+                    end
+                    default: fsm_state <= TOWER_FIELD;
+                endcase
+            end
+            else begin  // as Sbox is disabled it will freeze it's state
+                rst_trng <= 0;  // as Sbox is disabled, it's not going to drive TRNG's reset
+                sbox_done <= 0;  // as Sbox is in freeze state it's not going to assert done signal
+                fsm_state <= fsm_state;  // state has been freezed or on hold
+            end
         end
     end
 
@@ -310,18 +317,28 @@ module sbox #(
                     subBytes[(8*i) +: 8] <= 0;
                 end
                 else begin
-                    // the combinational block is broken into individual fsm states so that clock time peroid
-                    // can be >= worst individual sub block's critical path delay instead of sum of delays of all sub blocks
-                    case(fsm_state)
-                        // initial state which receives random bits from TRNG and performs tower field inversion
-                        TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
-                        MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                        MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
-                        SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
-                        default: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
-                    endcase
+                    if(!enb_n) begin  // since Sbox is enable it will continue to operate
+                        // the combinational block is broken into individual fsm states so that clock time peroid
+                        // can be >= worst individual sub block's critical path delay instead of sum of delays of all sub blocks
+                        case(fsm_state)
+                            // initial state which receives random bits from TRNG and performs tower field inversion
+                            TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                            MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                            MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16) +: 4], rand_num[((28*i)+12) +: 4]});
+                            MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24) +: 4], rand_num[((28*i)+20) +: 4], rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                            MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
+                            SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
+                            default: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4) +: 4], rand_num[(28*i) +: 4]});
+                        endcase
+                    end
+                    else begin  // as Sbox is disabled it will freeze it's state or stays on hold
+                        masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
+                        denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
+                        masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
+                        masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                        masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
+                        subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
+                    end
                 end
             end
         end
