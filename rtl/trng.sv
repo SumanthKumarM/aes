@@ -1,15 +1,10 @@
 /**
  * This TRNG block is designed to output 1680 random bits so that CIPHER block can consume it
- * CIPHER block internally has 2 Sbox's, one Sbox converts whole state matrix and produces subBytes 
-   for each element in state matrix. This Sbox consumes 448 random bits (28 random bits per byte)
- * Another Sbox is used in AddRoundKey for keyExpansion logic where Sbox converts a word (32-bits) and
-   produces subBytes for them. This Sbox consumes 112 random bits.
- * Each round in CIPHER invokes Sbox twice when KEY size is either 128 or 256 bits but CIPHER invokes Sbox
-   only once per round only when (i%6=0) is met. So the CIPHER consumes 560 random bits per round at max
- * This TRNG can output 1680 random bits so it can accommodate 3 CIPHER rounds. While CIPHER works for 
-   3 rounds, TRNG meanwhile computes next batch of 1680 random bits. 
- * So using this mechanism both TRNG and CIPHER work in a pipelined fashion to ensure maximum through-put
-   is acheieved using this design implementation 
+ * CIPHER block internally has 2 Sbox's, one Sbox converts whole state matrix and produces subBytes for each element in state matrix. This Sbox consumes 448 random bits (28 random bits per byte)
+ * Another Sbox is used in AddRoundKey for keyExpansion logic where Sbox converts a word (32-bits) and produces subBytes for them. This Sbox consumes 112 random bits.
+ * Each round in CIPHER invokes Sbox twice when KEY size is either 128 or 256 bits but CIPHER invokes Sbox only once per round only when (i%6=0) is met. So the CIPHER consumes 560 random bits per round at max
+ * This TRNG can output 1680 random bits so it can accommodate 3 CIPHER rounds. While CIPHER works for 3 rounds, TRNG meanwhile computes next batch of 1680 random bits. 
+ * So using this mechanism both TRNG and CIPHER work in a pipelined fashion to ensure maximum through-put is acheieved using this design implementation 
 **/
 
 import trng_param_pkg::*;
