@@ -45,41 +45,6 @@ module addRoundKey(
     // sbox that gives subBytes used when i % Nk = 0 in KeyExpansion
     sbox#(32) Sbox(subByte, sbox_done, rst_trng, trng_dead_flag, sbox_state, rand_num, sbox_enb_n, rst_n, clk);
 
-    // optimized modulus function, based on key_size corresponding modulus is performed
-    // key_size = 01 - 128-bit KEY - so mod 4 is performed
-    // key_size = 10 - 192-bit KEY - so mod 6 is performed
-    // key_size = 11 - 256-bit KEY - so mod 8 and mod of 8 = 4 is performed
-    function automatic bit mod_Nk(input logic [5:0] idx, input logic [1:0] keySize);
-        logic [1:0] sum_even_pos, sum_odd_pos;
-        bit is_div_by_3;
-
-        case(keySize)
-            2'b01, 2'b11: begin  // checks if idx % 4 = 0, idx % 8 = 0 and idx % 8 = 4
-                if(idx[1:0] == 2'b00) return 1;
-                else return 0;
-            end
-            2'b10: begin  // checks if idx % 6 = 0
-                // since divisible by 2, proceeding to check if divisible by 3
-                if(!idx[0]) begin 
-                    sum_even_pos = {(idx[4] & idx[2]), (idx[4] ^ idx[2])};  // half adder logic
-                    sum_odd_pos = {((idx[5] & idx[3]) | (idx[1] & (idx[5] ^ idx[3]))), (idx[5] ^ idx[3] ^ idx[1])};  // full adder logic
-                    
-                    // since sum_even_pos can never have 2'b11 value, it is enough to check if sum_odd_pos = 2'b11 and sum_even_pos = 2'b00
-                    // other than this condition, both sums being same also mean it is divisible by 3
-                    is_div_by_3 = ((sum_even_pos == sum_odd_pos) || (sum_even_pos == 2'b00 && sum_odd_pos == 2'b11)) ? 1 : 0;
-                    return is_div_by_3;
-                end
-                else begin  // since not divisible 2, it's also not divisible by 6
-                    sum_even_pos = 0;
-                    sum_odd_pos = 0;
-                    is_div_by_3 = 0;
-                    return 0;
-                end  
-            end
-            default: return 0;
-        endcase
-    endfunction
-
     // optimized division function based on KEY size
     function automatic unibble div_Nk(input logic [5:0] idx, input unibble Nk);
         unibble div_res;
@@ -166,9 +131,37 @@ module addRoundKey(
                     end
                 end
                 2'b11: begin  // AES-256
-                    
+                    sbox_enb_n = 0;  // enabling Sbox since it's required to compute subByte
+
+                    if(round_num[0] == 0) begin  // even rounds require first 4 KEY words
+                        sbox_state = rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]});  // loading Sbox input
+
+                        for(int i=0; i<4; i++) begin
+                            if(i == 0)  // since this index is multiple of 8 it satisfies i%Nk = 0. So special transformation is applied
+                                {expKey[3][0], expKey[2][0], expKey[1][0], expKey[0][0]} = {prev_expKey[3][0], prev_expKey[2][0], prev_expKey[1][0], prev_expKey[0][0]} ^ subByte ^ RCON[div_Nk(6'(round_num << 2), 8)];
+                            else  // remaining all indices in this loop range don't satisfy i%Nk = 0 or i%Nk = 4. So normal transformation is applied
+                                {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
+                        end
+                    end
+                    else begin  // odd rounds require last 4 KEY words 
+                        sbox_state = {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]};  // loading Sbox input
+
+                        for(int i=4; i<8; i++) begin
+                            if(i == 4)  // since this index satisfies i%Nk = 4, special transformation is applied
+                                {expKey[3][4], expKey[2][4], expKey[1][4], expKey[0][4]} = {prev_expKey[3][4], prev_expKey[2][4], prev_expKey[1][4], prev_expKey[0][4]} ^ subByte;
+                            else  // remaining all indices in this loop range don't satisfy i%Nk = 0 or i%Nk = 4. So normal transformation is applied
+                                {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
+                        end
+                    end
                 end
-                default: 
+                default: begin
+                    // disabling Sbox as it's not required yet
+                    sbox_enb_n = 1;  
+                    sbox_state = 32'h0000_0000;
+
+                    for(int i=0; i<8; i++) 
+                        {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = 32'h0000_0000;
+                end
             endcase
         end
     end
@@ -269,7 +262,42 @@ module addRoundKey(
                     end
                 end
                 2'b11: begin  // AES-256
+                    if(round_num == 0) begin  // first round simply uses master KEY
+                        for(int i=0; i<8; i++)  // simply loading maskter KEY into expKey for further usage
+                            {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= master_key[(32*i) +: 32];
 
+                        for(int i=0; i<4; i++)  // adding round KEY for round-0
+                            {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ master_key[(32*i) +: 32];
+                    end
+                    else begin  // remianing rounds use expanded KEYs
+                        if(sbox_done) begin  // updating the register since sbox_done is high 
+                            if(round_num[0] == 1) begin  // odd rounds don't generate new expanded KEYs, so previous batch KEYs are used
+                                for(int i=0; i<4; i++) begin  // updating current round KEYs so that these can be used in next round as previous round KEYs
+                                    {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]} <= {expKey[3][i+4], expKey[2][i+4], expKey[1][i+4], expKey[0][i+4]};
+                                    {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ {expKey[3][i+4], expKey[2][i+4], expKey[1][i+4], expKey[0][i+4]};
+
+                                    // explicitly holding values of these registers to avoid linting warning/errors
+                                    {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
+                                end
+                            end
+                            else begin  // even rounds generate new expanded KEYs which will be sufficient for current and next round, so using current round expanded KEYs
+                                for(int i=0; i<4; i++) begin
+                                    {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
+                                    {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
+
+                                    // explicitly holding values of these registers to avoid linting warning/errors
+                                    {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]} <= {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]};
+                                end
+                            end
+                        end
+                        else begin  // holding the previous round KEYs since sbox_done is not high
+                            for(int i=0; i<8; i++)
+                                {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
+                            
+                            for(int i=0; i<4; i++)
+                                {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+                        end
+                    end
                 end
                 default: 
             endcase
