@@ -1,4 +1,5 @@
 rtl/trng_param_pkg.sv
+sim/obj_dir
 sim/sim_build
 sim/.cache  /
 sim/dump.vcd

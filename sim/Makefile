@@ -9,11 +9,12 @@ TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
 TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
+export PYTHONDONTWRITEBYTECODE := 1  # Prevent __pycache__ creation in source directories 
 $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doesn't exist
 export PYTHONPATH := $(TB_DIR):$(SIM_DIR):$(PYTHONPATH)
 
 # Cocotb setup
-COCOTB_TEST_MODULES = trng_tb
+COCOTB_TEST_MODULES = addRoundKey_tb
 SIM = verilator
 
 # Linting Tools 
@@ -41,12 +42,18 @@ $(TRNG_PARAM_FILE): gen_param
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG)
 
-ifeq ($(block),trng)
-	BLOCK_DEPS += $(TRNG_PARAM_FILE)
-	VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
+ifneq ($(filter $(block),trng trng_sbox_top),)
+    BLOCK_DEPS += $(TRNG_PARAM_FILE)
+    VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
 endif
 
-VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
+ifeq ($(block),trng_sbox_top)
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),addRoundKey)
+    VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
+else
+	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
+endif
 
 # handle specific test selection
 ifneq ($(test),)
@@ -62,13 +69,29 @@ gen_param:
 	@echo "Generating RTL parameters..."
 	python $(SIM_DIR)/gen_param.py
 
+# RTL compilation marker - indicates RTL has been compiled
+RTL_COMPILED_MARKER = sim_build/.rtl_compiled
+
+# RTL compilation (generates C++ files and binaries)
+.PHONY: compile_rtl
+compile_rtl: $(BLOCK_DEPS)
+	@echo "Compiling RTL for $(block) with Verilator..."
+	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) -I$(RTL_DIR) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
+	@mkdir -p sim_build && touch $(RTL_COMPILED_MARKER)
+	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
+
+# Dependency: Only compile RTL if not already compiled
+$(RTL_COMPILED_MARKER): $(BLOCK_DEPS)
+	$(MAKE) compile_rtl
+
 .PHONY: run_all
-run_all: $(BLOCK_DEPS)
+run_all: $(RTL_COMPILED_MARKER)
+	@echo "Running all tests (using pre-compiled RTL)..."
 	$(MAKE) sim 2>&1 | tee sim.log
 
 .PHONY: run_test
-run_test: $(BLOCK_DEPS)
-	@echo "Running specific test: $(test)"
+run_test: $(RTL_COMPILED_MARKER)
+	@echo "Running specific test: $(test) (using pre-compiled RTL)"
 	$(MAKE) sim 2>&1 | tee sim.log
 
 # cocotb inclusion -
@@ -124,9 +147,10 @@ synth: $(BLOCK_DEPS)
 
 .PHONY: clean_all
 clean_all: clean
-	rm -f ./*.vcd ./*.fst ./*.log ./*.xml 
-	rm -rf sim_build ./.cache*
+	rm -f ./*.vcd ./*.fst ./*.log ./*.xml
+	rm -rf sim_build ./.cache* obj_dir
+	rm -rf $(TB_DIR)/__pycache__  # Remove any Python cache from source directory
 	rm -rf $(SYNTH_DIR)/*.log $(SYNTH_DIR)/*.dot $(SYNTH_DIR)/*.json $(SYNTH_DIR)/*.v
-	rm -rf $(SYNTH_DIR)/*.jou $(SYNTH_DIR)/*.rpt $(SYNTH_DIR)/*.dcp $(SYNTH_DIR)/*.svg.new 
+	rm -rf $(SYNTH_DIR)/*.jou $(SYNTH_DIR)/*.rpt $(SYNTH_DIR)/*.dcp $(SYNTH_DIR)/*.svg.new
 	rm -rf $(SYNTH_DIR)/*.pdf $(SYNTH_DIR)/*.backup.*
 	rm -rf $(LINT_DIR)/*.log $(LINT_DIR)/*.jou $(LINT_DIR)/*.rpt $(LINT_DIR)/*.backup.*

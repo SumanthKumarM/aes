@@ -1,6 +1,6 @@
 /**
  * This block can support all standard KEY sizes (i.e 128, 192 & 256-bit). So, this block is compatible with multi KEY size transactions
- * This blok internally instantiates Sbox which is used in KeyExpansion logic when speacial conditions are met which are defined in AES standard
+ * This blok internally instantiates Sbox which is used in KeyExpansion logic when special conditions are met which are defined in AES standard
  * KeyExpansion logic works based on the equations:
     - if i%Nk = 0 then w[i] = w[i-Nk] xor w[i-1]
     - if i%Nk != 0 then special transformation is applied, w[i] = w[i-Nk] xor subWord(RotWord(w[i-1])) xor RCON[i/Nk]
@@ -11,13 +11,15 @@ import type_defs_pkg::*;
 
 module addRoundKey( 
     output state_matrix_t addRoundKeyOut,  // output of addRoundKey
+    output logic sbox_ready,  // tells trng that s-box is ready to accept random bits
     output logic rst_trng,  // output from sbox that resets TRNG when fatal error occurs in TRNG
     input state_matrix_t state,  // input state matrix
     input logic [255:0] master_key,  // input master KEY
-    input logic [112:0] rand_num,  // random bits from TRNG for sbox
+    input logic [111:0] rand_num,  // random bits from TRNG for sbox
     input unibble round_num,  // input CIPHER which indicates number of AES rounds
-    input logic trng_dead_flag,  // input to sbox from TRNG to indicate that TRNG has some fatal error
     input logic [1:0] key_size,  // input from CONTROL register specifying the KEY size
+    input logic trng_dead_flag,  // input to sbox from TRNG to indicate that TRNG has some fatal error
+    input logic trng_key_valid,  // asserted by TRNG when it has random bits to give to s-box
     input rst_n, clk);
 
     // AES Key Expansion Round Constants (Rcon) table as specified in FIPS 197
@@ -27,7 +29,7 @@ module addRoundKey(
         32'h0100_0000,  // Index 1  (Round 1)
         32'h0200_0000,  // Index 2  (Round 2)
         32'h0400_0000,  // Index 3  (Round 3)
-        32'h0000_0000,  // Index 4  (Round 4)
+        32'h0800_0000,  // Index 4  (Round 4)
         32'h1000_0000,  // Index 5  (Round 5)
         32'h2000_0000,  // Index 6  (Round 6)
         32'h4000_0000,  // Index 7  (Round 7)
@@ -43,7 +45,7 @@ module addRoundKey(
     logic sbox_done;  // addRoundKey can know when Sbox is done with computing necessary subBytes
 
     // sbox that gives subBytes used when i % Nk = 0 in KeyExpansion
-    sbox#(32) Sbox(subByte, sbox_done, rst_trng, trng_dead_flag, sbox_state, rand_num, sbox_enb_n, rst_n, clk);
+    sbox#(32) Sbox(subByte, sbox_ready, sbox_done, rst_trng, trng_dead_flag, sbox_state, rand_num, trng_key_valid, sbox_enb_n, rst_n, clk);
 
     // optimized division function based on KEY size
     function automatic unibble div_Nk(input logic [5:0] idx, input unibble Nk);
@@ -79,10 +81,10 @@ module addRoundKey(
     // function to left rotate the bytes in a given word
     function automatic word_t rotWord(input word_t word);
         word_t rot_word;
-        rot_word[31:24] = word[7:0];
-        rot_word[23:16] = word[31:24];
-        rot_word[15:8] = word[23:16];
-        rot_word[7:0] = word[15:8];
+        rot_word[31:24] = word[23:16];
+        rot_word[23:16] = word[15:8];
+        rot_word[15:8] = word[7:0];
+        rot_word[7:0] = word[31:24];
         return rot_word;
     endfunction
 
@@ -142,9 +144,15 @@ module addRoundKey(
                             else  // remaining all indices in this loop range don't satisfy i%Nk = 0 or i%Nk = 4. So normal transformation is applied
                                 {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
                         end
+
+                        for(int i=4; i<8; i++)  // explicitly assignment to avoid latches
+                            {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = 32'h0000_0000;
                     end
                     else begin  // odd rounds require last 4 KEY words 
                         sbox_state = {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]};  // loading Sbox input
+
+                        for(int i=0; i<4; i++)  // explicitly assignment to avoid latches
+                            {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = 32'h0000_0000;
 
                         for(int i=4; i<8; i++) begin
                             if(i == 4)  // since this index satisfies i%Nk = 4, special transformation is applied
@@ -299,7 +307,13 @@ module addRoundKey(
                         end
                     end
                 end
-                default: 
+                default: begin
+                    for(int i=0; i<8; i++)
+                        {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
+                    
+                    for(int i=0; i<4; i++)
+                        {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+                end
             endcase
         end
     end
