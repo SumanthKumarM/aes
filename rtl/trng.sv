@@ -14,7 +14,7 @@ module trng(
     output logic [1679:0] rand_word,  // 1680-bit random packet to CIPHER block
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells AES_GCM that TRNG has failed
-    input logic sbox_ready,  // S-box acknowledges receipt of random words
+    input logic sbox_ready,  // SBox acknowledges receiption of random bits
     input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic clk, ext_rst_n);
@@ -84,12 +84,10 @@ module trng(
     health_tests hlth_tst(health_error, total_failure, rand_bit, enb_health_tests, clk, ext_rst_n);
 
     // keccak conditioning block (clk domain)
-    keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, 
-    get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
+    keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
 
     // control unit (clk domain)
-    control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, 
-    health_error, total_failure, trng_key_valid, clk, ext_rst_n);
+    control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, health_error, total_failure, trng_key_valid, clk, ext_rst_n);
 endmodule
 
 // entropy collector
@@ -100,7 +98,7 @@ module entropy_clctr(
 
     logic [5:0] sipo_fill_cntr; 
 
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!rst_n) begin
             entropy_word <= 0;
             valid <= 0;
@@ -132,7 +130,7 @@ module keccak_cond (
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
     input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
-    input logic sbox_ack,  // acknowledgement from S-Box() that it received 64 random words
+    input logic sbox_ready,  // signal from Sbox that it received random bits
     input logic valid,  // from entropy collector indicating that it's ready to send the data
     input logic clk, rst_n);
     
@@ -214,7 +212,7 @@ module keccak_cond (
         return iota_s;
     endfunction
 
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!rst_n) begin
             fsm_state <= ABSORB;
             rand_word <= 0;
@@ -290,7 +288,7 @@ module keccak_cond (
                     else begin
                         key_ready_req <= 1;  // key_ready_req has become high since required random bits computed
 
-                        if(sbox_ack) begin
+                        if(sbox_ready) begin
                             rand_word <= {state_flat[79:0], squeeze_buff};
                             fsm_state <= ABSORB;  // goes back to ABSORB state to compute another batch of random bits
                             squeeze_done <= 0;  // resetting it again for next batch
@@ -319,7 +317,7 @@ module health_tests (
     wire rct_error, apt_error;
 
     // Repetetion Count Test (RCT)
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!rst_n || !enable_health_test) begin
             rct_counter <= 0;
             rct_prev_bit <= 0;
@@ -336,7 +334,7 @@ module health_tests (
     assign rct_error = (rct_counter >= 4'(RCT_THRESHOLD)) ? 1 : 0;
 
     // Adaptive Proportion Test (APT)
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!rst_n || !enable_health_test) begin
             apt_window_cntr <= 0;
             apt_counter <= 0;
@@ -359,7 +357,7 @@ module health_tests (
     assign error = rct_error | apt_error;
 
     // total failure occurs when consecutive error occur
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!rst_n) begin
             err_cntr <= 0;
             prev_err <= 0;
@@ -399,7 +397,7 @@ module control_unit(
     logic [DRBG_CNTR_WIDTH-1 : 0] drbg_cntr;  // determines for how many cycles state matrix should get raw entropy
     logic err_state_delay;
 
-    always_ff@(posedge clk) begin
+    always_ff @(posedge clk) begin
         if(!ext_rst_n) begin
             fsm_state <= IDLE;
             noise_src_enb_n <= 1;

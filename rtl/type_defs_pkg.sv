@@ -22,4 +22,9 @@ package type_defs_pkg;
         SUB_BYTES,
         RESET_TRNG
     } sbox_states;
+
+    typedef enum logic {
+        PRE_ADDROUNDKEY, 
+        ADDROUNDKEY
+    } cipher_internal_states;
 endpackage
