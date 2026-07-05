@@ -51,6 +51,8 @@ ifeq ($(block),trng_sbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),addRoundKey)
     VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),cipher)
+	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else
 	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
 endif

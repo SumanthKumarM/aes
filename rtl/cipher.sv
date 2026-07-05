@@ -22,12 +22,14 @@ module cipher(
     state_matrix_t temp_state;
     unibble Nr;  // number of CIPHER rounds based on KEY size
     unibble round_cntr;  // keeps track of CIPHER round count
-    logic _rst_trng;  // this signal comes from SBox that is instantiated in adRoundKey which resets TRNG when it encounters fatal error
+    logic sbox_rst_trng, _sbox_rst_trng;  // these signals come from both SBoxes which reset TRNG when it encounters fatal error
     logic sbox_enb_n;  // SBox enable signal
+    logic sbox_done;  // signal from SBox which becomes high when Sbox is done computing sbuBytes
     logic ark_enb_n;  // addRoundKey enable signal
     logic ark_done;  // indicates that addRoundKey has computed the output
-    logic ark_done_delay;  // this 1 cycle delayed version of ark_done used to detect rising edge of ark_done
-    logic ark_done_pulse;  // 1 cycle pulse which becomes high when ark_done transitions from low to high
+    logic [127:0] sbox_state;  // state matrix to SBox
+    logic [127:0] subBytes;  // subBytes computed by Sbox for given state matrix
+    state_matrix_t subBytes_matrix;  // matrix version of subBytes
     state_matrix_t shift_rows;  // stores state that has gone through shiftRows
     state_matrix_t mix_columns;  // stores state that has gone through mixColumns
     state_matrix_t ark_state;  // input state to addRoundKey
@@ -35,27 +37,25 @@ module cipher(
     cipher_internal_states fsm_state;
 
     // sub-module instances
-    sbox_interface sbox_bus();
-    sbox SBox(sbox_bus, sbox_enb_n, rst_n, clk); 
-    shiftRows ShiftRows(shift_rows, sbox_bus.subBytes);
+    sbox_128 SBox(subBytes, sbox_ready, sbox_done, sbox_rst_trng, trng_dead_flag, sbox_state, rand_num[1343:0], trng_key_valid, sbox_enb_n, rst_n, clk); 
+    shiftRows ShiftRows(shift_rows, subBytes_matrix);
     mixColumns MixColumns(mix_columns, shift_rows);
-    addRoundKey AddRoundKey(addRoundKeyOut, ark_done, _rst_trng, ark_state, master_key, rand_num[1679:1344], round_cntr, key_size, trng_dead_flag, ark_enb_n, rst_n, clk);
+    addRoundKey AddRoundKey(addRoundKeyOut, ark_done, _sbox_rst_trng, ark_state, master_key, rand_num[1679:1344], round_cntr, key_size, trng_dead_flag, ark_enb_n, rst_n, clk);
 
-    assign rst_trng = sbox_bus.rst_trng | _rst_trng;  // if either of SBoxes assert rst_trng then TRNG gets reset signal
-    assign sbox_bus.trng_dead_flag = trng_dead_flag;  // forwarding trng_dead_flag signal to SBox
-    assign sbox_bus.trng_key_valid = trng_key_valid;  // forwarding trng_key_valid signal to SBox
-    assign sbox_bus.rand_num = rand_num[1343:0];  // slicing and forwarding rand_num received froom TRNG to SBox
-    assign sbox_ready = sbox_bus.sbox_ready;  // forwarding sbox_ready from SBox to CIPHER port
-    assign ark_done_pulse = ark_done & !ark_done_delay;
-
-    // number of CIPHER rounds (Nr) based on KEY size
     always_comb begin
+        rst_trng = sbox_rst_trng | _sbox_rst_trng;  // if either of SBoxes assert rst_trng then TRNG gets reset signal
+
+        // number of CIPHER rounds (Nr) based on KEY size
         case(key_size)
             2'b01: Nr = 4'hB;
             2'b10: Nr = 4'hD;
             2'b11: Nr = 4'hF;
             default: Nr = 4'h0;
         endcase
+
+        // rerouting subBytes to subBytes_matrix as both of them in different formats
+        for(int i=0; i<16; i++)
+            subBytes_matrix[i%4][i/4] = subBytes[((8*(i%4))+(32*(i/4))) +: 8];
     end
 
     /**
@@ -80,19 +80,17 @@ module cipher(
             round_cntr <= 0;
             sbox_enb_n <= 1;
             ark_enb_n <= 1;
-            ark_done_delay <= 0;
             cipher_done <= 0;
             fsm_state <= PRE_ADDROUNDKEY;
 
             for(int i=0; i<16; i++) begin
                 cipher_state[i%4][i/4] <= 8'h00;
                 temp_state[i%4][i/4] <= 8'h00;
+                sbox_state[((8*(i%4))+(32*(i/4))) +: 8] <= 8'h00;
                 ark_state[i%4][i/4] <= 8'h00;
             end
         end
         else begin  // (for round from 1 to Nr − 1 do ... end for) & last round
-            ark_done_delay <= ark_done;
-
             if(round_cntr == 0) begin  // only AddRoundKey is performed in first cipher round
                 sbox_enb_n <= 1;  // Sbox is not required yet
                 ark_enb_n <= 0;  // addRoundKey is enabled
@@ -107,40 +105,41 @@ module cipher(
                     PRE_ADDROUNDKEY: begin
                         sbox_enb_n <= 0;  // enabling Sbox as it's required to compute subBytes
                         ark_enb_n <= 1;
+                        cipher_done <= 0;  // CIPHER is not done computing transformed state yet
                         
                         for(int i=0; i<16; i++)  // loading Sbox input with previous addRoundKey's output
-                            sbox_bus.state[((8*(i%4))+(32*(i/4))) +: 8] <= temp_state[i%4][i/4];
+                            sbox_state[((8*(i%4))+(32*(i/4))) +: 8] <= temp_state[i%4][i/4];
 
                         // since SBox is done computing subBytes it will traverse through ShiftRows and MixColumns which are pure combinational giving MixColumn's / ShiftRow's output
-                        temp_state <= (sbox_bus.sbox_done) ? ((round_cntr == Nr) ? shift_rows : mix_columns) : temp_state;
-                        cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                        fsm_state <= (sbox_bus.sbox_done) ? ADDROUNDKEY : PRE_ADDROUNDKEY;
+                        temp_state <= (sbox_done) ? ((round_cntr == Nr) ? shift_rows : mix_columns) : temp_state;
+                        fsm_state <= (sbox_done) ? ADDROUNDKEY : PRE_ADDROUNDKEY;
                     end 
                     ADDROUNDKEY: begin
                         sbox_enb_n <= 1;
                         ark_enb_n <= 0;
                         ark_state <= temp_state;  // loading addRoundKey input with MixColumn's / ShiftRow's output
                         temp_state <= (ark_done) ? addRoundKeyOut : temp_state;
-                        cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                        fsm_state <= (ark_done) ? PRE_ADDROUNDKEY : ADDROUNDKEY;
+
+                        if(ark_done) begin
+                            if(round_cntr == Nr) begin 
+                                cipher_state <= addRoundKeyOut;
+                                cipher_done <= 1;
+                                round_cntr <= 0;  // starting over CIPHER counter as it's reached maximum rounds for this KEY size
+                            end
+                            else begin 
+                                cipher_done <= 0;  // CIPHER is not done computing transformed state yet
+                                round_cntr <= round_cntr + 1;  // updating CIPHER counter as state has been updated
+                            end
+
+                            fsm_state <= PRE_ADDROUNDKEY;
+                        end
+                        else begin 
+                            cipher_done <= 0;  // CIPHER is not done computing transformed state yet
+                            round_cntr <= round_cntr;
+                            fsm_state <= ADDROUNDKEY;
+                        end
                     end
                 endcase
-
-                if(ark_done_pulse) begin
-                    if(round_cntr == Nr) begin 
-                        cipher_state <= addRoundKeyOut;
-                        cipher_done <= 1;
-                        round_cntr <= 0;  // starting over CIPHER counter as it's reached maximum rounds for this KEY size
-                    end
-                    else begin 
-                        cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                        round_cntr <= round_cntr + 1;  // updating CIPHER counter as state has been updated
-                    end
-                end
-                else begin 
-                    cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                    round_cntr <= round_cntr;
-                end
             end
         end
     end

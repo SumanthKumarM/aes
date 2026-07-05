@@ -6,6 +6,27 @@ if {$argc != 1} {
 set block [lindex $argv 0]
 set RTL_DIR [file normalize "../rtl"]
 
+# Define block dependencies
+proc get_block_dependencies { block } {
+    set deps [list]
+
+    switch -exact -- $block {
+        "cipher" {
+            lappend deps "sbox.sv" "shiftRows.sv" "mixColumns.sv" "addRoundKey.sv"
+        }
+        "addRoundKey" {
+            lappend deps "sbox.sv"
+        }
+        "trng_sbox_top" {
+            lappend deps "trng.sv" "sbox.sv"
+        }
+        default {
+            # No external dependencies for this block
+        }
+    }
+    return $deps
+}
+
 # Auto-discover source files needed for $block
 # Parses "import <pkg_name>::" from the block's
 # .sv and pulls in matching *_pkg.sv files first.
@@ -23,7 +44,24 @@ proc discover_sources { rtl_dir block } {
 
     set sources [list]
 
-    # Extract every "import <identifier>::" token
+    # Step 1: Add type definitions package (always needed)
+    set pkg_file [file join $rtl_dir "type_defs_pkg.sv"]
+    if {[file exists $pkg_file]} {
+        lappend sources $pkg_file
+        puts "  \[auto\] including package: $pkg_file"
+    }
+
+    # Step 2: Add module dependencies based on block type
+    set dependencies [get_block_dependencies $block]
+    foreach dep $dependencies {
+        set dep_file [file join $rtl_dir $dep]
+        if {[file exists $dep_file] && [lsearch -exact $sources $dep_file] == -1} {
+            lappend sources $dep_file
+            puts "  \[auto\] including module:  $dep_file"
+        }
+    }
+
+    # Step 3: Add any additional packages imported by the main block
     set pos 0
     while {[regexp -start $pos -indices {import\s+([A-Za-z_][A-Za-z0-9_]*)\s*::} $content fullm pkgm]} {
 
