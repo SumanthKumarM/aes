@@ -1,0 +1,418 @@
+= Composite Masked Inverse AES S-Box Implementation
+:description: First-order masked inverse AES S-Box using Canright composite field inversion
+:toc:
+:toc-title: Table of Contents
+:sectnums:
+:stem:
+
+== Overview
+
+This document describes the implementation of a *first-order masked inverse AES S-Box* (`InvSBox`), used by the `InvSubBytes()` transformation during AES decryption. It reuses the *Canright composite field inversion* datapath already built for the forward S-Box, described in link:sbox.adoc[Composite Masked AES S-Box Implementation].
+
+The forward AES SubBytes transformation is defined as:
+
+----
+b′ = A · b⁻¹ ⊕ c
+----
+
+The inverse S-Box must exactly undo this, which — solving for `b` — gives:
+
+[latexmath]
+++++
+\text{InvSBox}(b') = \left( A^{-1} \cdot b' \oplus d \right)^{-1}
+++++
+
+Where:
+
+* `b′` is the output of the forward S-Box (the ciphertext-side byte, input to `InvSBox`)
+* `b` is the original AES byte (output of `InvSBox`)
+* `A⁻¹` is the inverse affine transformation matrix
+* `c = 0x63` is the forward affine constant
+* `d = A⁻¹ · c = 0x05` is the inverse affine constant
+* Multiplicative inversion `(·)⁻¹` is performed over `GF(2⁸)`
+
+=== The Key Structural Insight
+
+Computing `b⁻¹` in `GF(2⁸)` is an *involution*: `(b⁻¹)⁻¹ = b`. This means the exact same composite-field inversion circuit built for the forward S-Box — tower-field decomposition, norm `D`, `D⁻¹`, `A⁻¹`, basis transform back — is reused *unchanged* for the inverse S-Box. The only thing that moves is the affine transformation:
+
+* *Forward S-Box*: invert first (`GF(2⁸)⁻¹`), *then* affine transform (`A`, `c`).
+* *Inverse S-Box*: affine transform first (`A⁻¹`, `d`), *then* invert (`GF(2⁸)⁻¹`).
+
+Since both the inverse-affine step and the basis transform `T` are linear `GF(2)` operations, they can be *fused into one combined XOR network*, meaning `InvSBox` needs no separate "apply affine, then apply T" sequence — it is one linear stage, playing the exact architectural role that `tower_field()` already plays in `sbox.sv`.
+
+The inverse S-Box therefore consists of the following stages:
+
+----
+InvSBox Input (b′)
+        │
+        ▼
+Inverse Affine Transformation  ─┐
+        │                       │  fused into one XOR network
+        ▼                       │  (see "Basis Transformation" below)
+Basis Transformation           ─┘
+        │
+        ▼
+Composite Field Representation  {a₁, a₀} ∈ GF(2⁴) × GF(2⁴)
+        │
+        ▼
+Masked Composite Field Inversion   (unchanged from sbox.adoc)
+        │
+        ▼
+Inverse Basis Transformation (T⁻¹)   (unchanged from sbox.adoc)
+        │
+        ▼
+Original AES Byte (b)
+----
+
+== Field Definitions
+
+Identical to the forward S-Box (see link:sbox.adoc#_field_definitions[Field Definitions] in sbox.adoc): AES operates in `GF(2⁸)` defined by `x⁸ + x⁴ + x³ + x + 1`, decomposed for composite inversion as `GF((2⁴)²)` with inner field `GF(2⁴)` defined by `(y⁴ + y + 1)` and extension polynomial `(x² + x + λ)`, where `λ = 0x8`. No changes are required here — the field arithmetic does not depend on encryption/decryption direction.
+
+== Inverse Affine Transformation
+
+The first stage undoes the affine transformation applied by the forward S-Box.
+
+[latexmath]
+++++
+\text{InvAffine}(b') = A^{-1} \cdot b' \oplus d, \qquad d = A^{-1} \cdot c
+++++
+
+=== Inverse Affine Matrix
+
+[latexmath]
+++++
+A^{-1} = \begin{bmatrix}
+0 & 0 & 1 & 0 & 0 & 1 & 0 & 1 \\
+1 & 0 & 0 & 1 & 0 & 0 & 1 & 0 \\
+0 & 1 & 0 & 0 & 1 & 0 & 0 & 1 \\
+1 & 0 & 1 & 0 & 0 & 1 & 0 & 0 \\
+0 & 1 & 0 & 1 & 0 & 0 & 1 & 0 \\
+0 & 0 & 1 & 0 & 1 & 0 & 0 & 1 \\
+1 & 0 & 0 & 1 & 0 & 1 & 0 & 0 \\
+0 & 1 & 0 & 0 & 1 & 0 & 1 & 0
+\end{bmatrix}
+++++
+
+[latexmath]
+++++
+c = \text{0x63} = 01100011_2 \qquad\Rightarrow\qquad d = A^{-1} \cdot c = \text{0x05} = 00000101_2
+++++
+
+[NOTE]
+====
+The matrix above follows the Rijndael/Canright mathematical convention in which vectors are indexed LSB-to-MSB (bit 0 at the top row, bit 7 at the bottom). This convention is used only for the derivation below. During RTL implementation, translate these equations to the project's native `logic [7:0]` (MSB-to-LSB) indexing, exactly as `tower_field()` in `sbox.sv` already does for the forward matrix `T`.
+====
+
+Each row of `A⁻¹` has exactly *three* `1` entries (compared to *five* per row in the forward matrix `A` — see link:sbox.adoc[sbox.adoc]), so `InvAffine` reduces to the compact bit equations:
+
+[latexmath]
+++++
+\tilde{b}_i = b'_{(i+2) \bmod 8} \;\oplus\; b'_{(i+5) \bmod 8} \;\oplus\; b'_{(i+7) \bmod 8} \;\oplus\; d_i, \qquad i = 0 \ldots 7
+++++
+
+where `d = {d₇...d₀} = 00000101₂`, i.e. `d₀ = 1`, `d₂ = 1`, all other `dᵢ = 0`.
+
+Both the matrix multiplication and the constant XOR are linear over `GF(2)` and require only XOR gates — no `AND` gates, no finite-field multiplication.
+
+=== Why Masking Is Not Introduced Here
+
+Although `InvAffine` is linear and therefore preserves masking —
+
+[latexmath]
+++++
+A^{-1}(x_0 \oplus x_1) = A^{-1}(x_0) \oplus A^{-1}(x_1)
+++++
+
+— masking is deliberately postponed until the composite-field representation, exactly matching the forward S-Box design (see link:sbox.adoc#_masking_strategy[Masking Strategy] in sbox.adoc). Reasons:
+
+* Reduced hardware overhead — no masked datapath needed for a purely linear stage
+* Identical masking boundary to the forward S-Box (masking begins immediately before the first nonlinear operation, i.e. the multiplication inside `D`)
+* No security advantage from masking linear operations — an unmasked linear function of a masked value leaks nothing about the unmasked value, because masking commutes with linearity
+
+Consequently, both `InvAffine` and the basis transform `T` are implemented as *unmasked XOR networks*, and masking is introduced only when the result is split into shares `{a₁ᵣ, a₁ₘ, a₀ᵣ, a₀ₘ}` — identical to the forward S-Box's `tower_field()` boundary.
+
+== Basis Transformation
+
+=== Forward Basis Matrix (T) — Reused Unchanged
+
+The composite-field inversion hardware operates in `GF((2⁴)²)`, so the AES-basis byte must be converted using the same `8×8` matrix `T` defined in link:sbox.adoc#_basis_transformation[Basis Transformation] of sbox.adoc:
+
+[latexmath]
+++++
+\{a_1, a_0\} = T \cdot x_{\text{AES}}
+++++
+
+This transformation is *completely independent* of whether the byte originates from encryption, decryption, or key expansion — it only depends on the field element's representation, not its origin. Therefore `T` is reused without modification.
+
+=== Fusing InvAffine with T — Deriving `inv_tower_field`
+
+Since `InvAffine` and `T` are *both* linear `GF(2)` maps, their composition `T ∘ InvAffine` is itself one linear map, and can be implemented as a *single* XOR network taking the ciphertext-side byte `b′` directly to the pre-masked tower-field value `a[7:0]` — skipping the intermediate `b̃` entirely. Substituting `InvAffine`'s bit equations into `tower_field()`'s `T` equations (from `sbox.sv`) yields:
+
+[latexmath]
+++++
+\begin{aligned}
+a_7 &= b'_1 \oplus b'_2 \oplus b'_6 \oplus b'_7 \\
+a_6 &= b'_0 \oplus b'_4 \oplus b'_5 \oplus b'_6 \oplus 1 \\
+a_5 &= b'_3 \oplus b'_4 \oplus b'_5 \oplus b'_6 \\
+a_4 &= b'_0 \oplus b'_1 \oplus b'_2 \oplus b'_4 \oplus b'_5 \oplus b'_6 \oplus b'_7 \\
+a_3 &= b'_0 \oplus b'_1 \oplus b'_2 \oplus b'_3 \oplus b'_5 \oplus b'_6 \\
+a_2 &= b'_1 \oplus b'_4 \oplus 1 \\
+a_1 &= b'_1 \oplus b'_4 \oplus b'_7 \oplus 1 \\
+a_0 &= b'_1 \oplus b'_5 \oplus b'_6 \oplus 1
+\end{aligned}
+++++
+
+This combined network — call it `inv_tower_field()` — is a *drop-in structural replacement* for `tower_field()`: same inputs (ciphertext byte + random byte for masking), same output shape (`masked_a[7:4]`/`masked_a[3:0]` shares). Masking is applied at exactly the same point:
+
+----
+masked_a[7:4] = a[7:4] ^ rand_byte[7:4]     ← a₁ₘ = a₁ ⊕ a₁ᵣ
+masked_a[3:0] = a[3:0] ^ rand_byte[3:0]     ← a₀ₘ = a₀ ⊕ a₀ᵣ
+----
+
+=== Inverse Basis Matrix (T⁻¹) — Reused Unchanged
+
+`T⁻¹`, defined in link:sbox.adoc#_inverse_basis_matrix_t⁻¹[Inverse Basis Matrix (T⁻¹)] of sbox.adoc, converts the composite-field result back to the AES polynomial basis after inversion. It is needed identically here (see <<Final Output — No Further Affine Needed>> below).
+
+== Composite Field Inversion
+
+Identical to the forward S-Box (link:sbox.adoc#_composite_field_inversion[Composite Field Inversion] in sbox.adoc) — `GF(2⁸)` inversion via `GF((2⁴)²)` does not depend on which direction (encrypt/decrypt) produced its input:
+
+[latexmath]
+++++
+A^{-1} = D^{-1} \cdot \bar{A}, \qquad \bar{A} = a_1 x + (a_1 \oplus a_0), \qquad D = a_1^2 \lambda \oplus a_0 a_1 \oplus a_0^2
+++++
+
+All arithmetic performed in `GF(2⁴)`.
+
+== Masking Strategy
+
+Identical philosophy to sbox.adoc: mask is introduced *at the input* (immediately after the fused `inv_tower_field` stage above), before any nonlinear operation. Linear operations are applied independently per share; only genuine `GF(2⁴)` multiplications require fresh TRNG randomness.
+
+=== Input Splitting
+
+Before any multiplication, `a₁` and `a₀` are split into two shares using fresh TRNG randomness `R₁, R₂` — same as sbox.adoc:
+
+----
+a₁ᵣ = R₁                 ← random mask from TRNG
+a₁ₘ = a₁ ⊕ a₁ᵣ           ← masked share
+
+a₀ᵣ = R₂                 ← random mask from TRNG
+a₀ₘ = a₀ ⊕ a₀ᵣ           ← masked share
+----
+
+== Masked Multiplication Gadget
+
+*Unchanged* from sbox.adoc. For masked operands `A = A₁ ⊕ A₂`, `B = B₁ ⊕ B₂`, using fresh randomness `R`:
+
+----
+C₁ = A₁·B₁ ⊕ R
+C₂ = A₁·B₂ ⊕ A₂·B₁ ⊕ A₂·B₂ ⊕ R
+----
+
+Verification: `C₁ ⊕ C₂ = (A₁ ⊕ A₂)(B₁ ⊕ B₂) = A·B` ✓
+
+== Computing D in Masked Form
+
+*Unchanged* from sbox.adoc. Recall `D = a₁²λ ⊕ a₁a₀ ⊕ a₀²`.
+
+=== Squaring Terms — Linear, Split for Free
+
+----
+a₁² = (a₁ₘ ⊕ a₁ᵣ)² = a₁ₘ² ⊕ a₁ᵣ²     ← no R needed
+a₀² = (a₀ₘ ⊕ a₀ᵣ)² = a₀ₘ² ⊕ a₀ᵣ²     ← no R needed
+----
+
+=== Multiplication Term — Masked Multiplication Gadget with R₃
+
+----
+P₁ = a₁ₘ·a₀ₘ ⊕ R₃
+P₂ = a₁ₘ·a₀ᵣ ⊕ a₁ᵣ·a₀ₘ ⊕ a₁ᵣ·a₀ᵣ ⊕ R₃
+----
+
+=== Assembling D₁ and D₂
+
+----
+D₁ = a₁ₘ²·λ ⊕ P₁ ⊕ a₀ₘ²
+D₂ = a₁ᵣ²·λ ⊕ P₂ ⊕ a₀ᵣ²
+----
+
+Verification: `D₁ ⊕ D₂ = a₁²λ ⊕ a₁a₀ ⊕ a₀² = D` ✓ — `D` is born already masked.
+
+== Computing D⁻¹ in Masked Form
+
+*Unchanged* from sbox.adoc. Since `GF(2⁴)` has 16 elements: `D⁻¹ = D¹⁴ = D⁸ · D⁴ · D²`.
+
+=== Squarings — Purely Linear, Zero Cost
+
+----
+D₁², D₂²   →  shares of D²    (no R needed)
+D₁⁴, D₂⁴   →  shares of D⁴    (no R needed)
+D₁⁸, D₂⁸   →  shares of D⁸    (no R needed)
+----
+
+=== First Masked Multiply — D⁸ · D⁴ using R₄
+
+----
+Q₁ = D₁⁸·D₁⁴ ⊕ R₄
+Q₂ = D₁⁸·D₂⁴ ⊕ D₂⁸·D₁⁴ ⊕ D₂⁸·D₂⁴ ⊕ R₄
+----
+
+=== Second Masked Multiply — (D⁸·D⁴) · D² using R₅
+
+----
+E₁ = Q₁·D₁² ⊕ R₅
+E₂ = Q₁·D₂² ⊕ Q₂·D₁² ⊕ Q₂·D₂² ⊕ R₅
+----
+
+Verification: `E₁ ⊕ E₂ = D⁸·D⁴·D² = D¹⁴ = D⁻¹` ✓
+
+== Computing A⁻¹ in Masked Form
+
+*Unchanged* from sbox.adoc. Need `new_a₁ = D⁻¹·a₁` and `new_a₀ = D⁻¹·(a₁ ⊕ a₀)`.
+
+=== Masked Multiply D⁻¹ · a₁ using R₆
+
+----
+F₁ = E₁·a₁ₘ ⊕ R₆
+F₂ = E₁·a₁ᵣ ⊕ E₂·a₁ₘ ⊕ E₂·a₁ᵣ ⊕ R₆
+----
+
+=== Masked Multiply D⁻¹ · (a₁ ⊕ a₀) using R₇
+
+----
+G₁ = E₁·(a₁ₘ ⊕ a₀ₘ) ⊕ R₇
+G₂ = E₁·(a₁ᵣ ⊕ a₀ᵣ) ⊕ E₂·(a₁ₘ ⊕ a₀ₘ) ⊕ E₂·(a₁ᵣ ⊕ a₀ᵣ) ⊕ R₇
+----
+
+Verification: `F₁ ⊕ F₂ = new_a₁`, `G₁ ⊕ G₂ = new_a₀` ✓
+
+== Optimized GF(2⁴) Squarer
+
+*Unchanged* from sbox.adoc — see link:sbox.adoc#_optimized_gf24_squarer[Optimized GF(2⁴) Squarer]. For `inp = {a3,a2,a1,a0}` reduced mod `x⁴+x+1`:
+
+----
+out[3] = a3
+out[2] = a3 ⊕ a1
+out[1] = a2
+out[0] = a2 ⊕ a0
+----
+
+== Final Output — No Further Affine Needed
+
+After `A⁻¹` is computed in masked share form, `T⁻¹` is applied independently to each share (identical to sbox.adoc's `masked_b_inverse()`):
+
+----
+{new_a1_share1, new_a0_share1}  →  T⁻¹  →  b_inv_share1
+{new_a1_share2, new_a0_share2}  →  T⁻¹  →  b_inv_share2
+----
+
+In the *forward* S-Box, a final `affine_transformation()` step applies matrix `A` and XORs constant `0x63` after this point. In the *inverse* S-Box, that affine step already happened *before* entering the tower field — fused into `inv_tower_field()` above. So here, no matrix and no constant are needed: the two shares are simply recombined.
+
+[latexmath]
+++++
+\text{InvSBox}(b') = b_{\text{inv\_share1}} \oplus b_{\text{inv\_share2}}
+++++
+
+*Why this is correct:* the reconstructed value equals `T⁻¹(A⁻¹)` where `A = T(InvAffine(b'))`. Since `T⁻¹ ∘ (·)⁻¹ ∘ T` computes `GF(2⁸)` inversion, the result is exactly `GF(2⁸)⁻¹(InvAffine(b')) = InvSBox(b')` — no residual affine transform outstanding. This also confirms the round-trip identity `SBox(InvSBox(b')) = b'`, since `GF(2⁸)` inversion is an involution and `Affine ∘ InvAffine = id`.
+
+== Architectural Symmetry and Reuse Summary
+
+The datapaths are near-mirror images of each other. Only the linear transformations surrounding the composite inversion block differ:
+
+.Forward S-Box (sbox.adoc)
+----
+AES Byte
+    │
+Basis Transformation (T)
+    │
+Create Masked Shares
+    │
+Masked Composite Field Inversion
+    │
+Inverse Basis Transformation (T⁻¹)
+    │
+Affine Transformation (A, c)
+    │
+S-Box Output (b′)
+----
+
+.Inverse S-Box (this document)
+----
+S-Box Output (b′)
+    │
+Inverse Affine Transformation (A⁻¹, d)   ─┐  fused into
+Basis Transformation (T)                 ─┘  inv_tower_field()
+    │
+Create Masked Shares
+    │
+Masked Composite Field Inversion
+    │
+Inverse Basis Transformation (T⁻¹)
+    │
+Original AES Byte (b)
+----
+
+[cols="2,3,1"]
+|===
+| Stage | Function (sbox.sv naming) | Status
+
+| Input transform | `tower_field()` → `inv_tower_field()` | *New* (fuses InvAffine + T)
+| `xTimes`, `gf4_mul`, `sqr_func` | unchanged | Reused
+| `masked_mul` | unchanged | Reused
+| `masked_denominator` (`D`) | unchanged | Reused
+| `masked_d_inverse` (`D⁻¹`) | unchanged | Reused
+| `masked_A_inverse` (`A⁻¹`) | unchanged | Reused
+| `masked_b_inverse` (`T⁻¹` per share) | unchanged | Reused
+| Output combine | `affine_transformation()` → plain XOR of shares | *New* (simpler — no matrix/constant)
+| FSM / ports / RNG slicing / handshake | unchanged | Reused
+|===
+
+*Bottom line:* only 2 of the ~9 datapath functions need new logic — `inv_tower_field()` (one XOR network, replacing `tower_field()`) and the final share-combine (a plain XOR, replacing `affine_transformation()`). Every masked `GF(2⁴)` arithmetic function, the FSM, and the TRNG handshake are reused byte-for-byte.
+
+== Verification
+
+The `InvSBox` output must match the official inverse S-Box table defined in *FIPS 197, Table 6*.
+
+=== Spot-Check Test Vectors
+
+[cols="1,1,1"]
+|===
+| Forward relation | Implied inverse relation | Meaning
+
+| `SBox(0x00) = 0x63` | `InvSBox(0x63) = 0x00` | `InvAffine(0x63) = 0x00`, and `0⁻¹ = 0` by definition
+| `SBox(0x53) = 0xED` | `InvSBox(0xED) = 0x53` | `InvAffine(0xED) = 0xCA`, and `GF(2⁸)⁻¹(0xCA) = 0x53`
+| `SBox(0x01) = 0x7C` | `InvSBox(0x7C) = 0x01` | `InvAffine(0x7C) = 0x01`, and `0x01⁻¹ = 0x01`
+|===
+
+=== Exhaustive Verification
+
+Beyond spot checks, the full derivation was verified computationally against *all 256 possible byte values*, cross-checking four independent claims:
+
+. `InvAffine()` (taps `{2,5,7}`, constant `d=0x05`) exactly inverts the forward affine transformation for all 256 bytes.
+. `forward_affine(GF(2⁸)⁻¹(x))` reproduces the official FIPS 197 Table 4 (`SBox`) for all 256 values.
+. `GF(2⁸)⁻¹(InvAffine(y))` reproduces the official FIPS 197 Table 6 (`InvSBox`) for all 256 values.
+. The fused `inv_tower_field()` equations exactly equal `T(InvAffine(x))` for all 256 values, and the *full pipeline* — `inv_tower_field → composite inversion (D, D⁻¹, A⁻¹) → T⁻¹` — reproduces Table 6 end-to-end for all 256 values, using the identical `GF(2⁴)` arithmetic (`xTimes`, `gf4_mul`, `sqr_func`, `λ=0x8`) as `sbox.sv`.
+
+All four checks pass with zero mismatches across the full input space.
+
+=== Independent Cross-Check
+
+The inverse affine constant and tap positions are independently corroborated by the public Rijndael S-box literature, which states the equivalent rotate-based formula:
+
+----
+b = ROTL8(s,1) ⊕ ROTL8(s,3) ⊕ ROTL8(s,6) ⊕ 0x05
+----
+
+Rewriting `ROTL8(s,n)ᵢ = s₍ᵢ₋ₙ₎ mod 8` gives taps at `{(i-1), (i-3), (i-6)} mod 8 = {(i+7), (i+5), (i+2)} mod 8` — the identical `{2,5,7}` tap set and `d=0x05` constant derived above.
+
+== References
+
+* *FIPS 197* — Advanced Encryption Standard (AES), NIST, 2001 (updated 2023), Section 5.3.2 (`InvSubBytes()`) and Table 6 (`InvSBox`). +
+  https://doi.org/10.6028/NIST.FIPS.197-upd1
+
+* *Canright, D.* — A Very Compact Rijndael S-box. Naval Postgraduate School Technical Report, 2005.
+
+* *Rijndael S-box* — Wikipedia, inverse affine transformation formula (`ROTL8` form), used as an independent cross-check of the `{2,5,7}` / `0x05` derivation above. +
+  https://en.wikipedia.org/wiki/Rijndael_S-box
+
+* link:sbox.adoc[Composite Masked AES S-Box Implementation] — forward S-Box document; every "unchanged"/"reused" reference above points here.
