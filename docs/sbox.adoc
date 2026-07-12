@@ -1,0 +1,363 @@
+= Composite Masked AES S-Box Implementation
+:description: First-order masked AES S-Box using Canright composite field inversion
+:toc:
+:toc-title: Table of Contents
+:sectnums:
+:stem:
+
+== Overview
+
+This document describes the implementation of a *first-order masked AES S-Box* using *Canright's composite field inversion method*.
+
+The AES SubBytes transformation is defined as:
+
+----
+b′ = A · b⁻¹ ⊕ c
+----
+
+Where:
+
+* `b` is a byte in GF(2⁸)
+* `b⁻¹` is the multiplicative inverse in GF(2⁸)
+* `A` is the affine transformation matrix
+* `c` is the affine constant vector
+
+The most computationally expensive step is computing `b⁻¹`.
+This design computes the inverse using composite field arithmetic:
+
+----
+GF(2⁸) ≅ GF((2⁴)²)
+----
+
+== Field Definitions
+
+AES operates in GF(2⁸) defined by the polynomial: `x⁸ + x⁴ + x³ + x + 1`
+
+For composite inversion, the field is decomposed as GF((2⁴)²):
+
+* Inner field GF(2⁴) defined by `(y⁴ + y + 1)`
+* Extension polynomial: `(x² + x + λ)`
+
+For Canright's basis choice:
+
+----
+λ = 0x8
+----
+
+This value arises from the *basis transformation between GF(2⁸) and the tower field representation*.
+
+== Basis Transformation
+
+To perform composite inversion, the AES byte must first be converted into the *tower field representation* using a fixed *8×8 linear transformation matrix*.
+
+The transformation is performed over *GF(2)*, meaning:
+
+* addition = XOR
+* multiplication = AND
+
+=== Forward Basis Matrix (T)
+
+Transforms AES byte → tower field representation (GF((2⁴)²)):
+
+----
+{a₁, a₀} = T · b
+----
+
+[latexmath]
+++++
+T = \begin{bmatrix}
+1 & 0 & 1 & 0 & 0 & 0 & 0 & 0 \\
+1 & 0 & 1 & 0 & 1 & 1 & 0 & 0 \\
+1 & 1 & 0 & 1 & 0 & 0 & 1 & 0 \\
+0 & 1 & 1 & 1 & 0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 1 & 1 & 0 & 0 & 0 \\
+1 & 1 & 1 & 1 & 1 & 1 & 0 & 0 \\
+0 & 0 & 0 & 0 & 0 & 1 & 0 & 0 \\
+1 & 0 & 1 & 0 & 0 & 0 & 0 & 1
+\end{bmatrix}
+++++
+
+After transformation: `A(x) = a₁x + a₀` where `a₁, a₀ ∈ GF(2⁴)`.
+
+This operation is implemented purely using *XOR networks* in hardware.
+
+=== Inverse Basis Matrix (T⁻¹)
+
+After composite inversion, the tower field representation is converted back to the AES polynomial basis (GF((2⁴)²) → AES byte):
+
+[latexmath]
+++++
+T^{-1} = \begin{bmatrix}
+1 & 1 & 0 & 1 & 0 & 1 & 0 & 0 \\
+1 & 0 & 0 & 0 & 1 & 1 & 1 & 0 \\
+0 & 1 & 0 & 1 & 0 & 1 & 0 & 0 \\
+1 & 1 & 0 & 0 & 1 & 0 & 1 & 0 \\
+1 & 1 & 0 & 0 & 0 & 0 & 1 & 0 \\
+0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 \\
+1 & 0 & 1 & 1 & 0 & 0 & 0 & 0 \\
+1 & 0 & 0 & 0 & 0 & 0 & 0 & 1
+\end{bmatrix}
+++++
+
+This transformation is also linear and implemented entirely using *XOR logic*.
+
+== Composite Field Inversion
+
+After applying the forward basis transform:
+
+----
+A(x) = a₁x + a₀
+----
+
+The multiplicative inverse A(x) in GF((2⁴)²) is:
+
+----
+A⁻¹ = D⁻¹ · Ā
+----
+
+Where:
+
+* *Ā* is the conjugate of A, obtained by evaluating A at the other root (α+1 instead of α):
++
+----
+Ā = a₁(x + 1) + a₀ = a₁x + (a₁ ⊕ a₀)
+----
+
+* *D* (the norm of A):
++
+----
+D = a₁²λ ⊕ a₀a₁ ⊕ a₀²
+----
+
+All arithmetic is performed in *GF(2⁴)*.
+
+== Masking Strategy
+
+To protect against *power analysis attacks*, the design uses *first-order Boolean masking*.
+The mask is introduced *at the input*, before any nonlinear operation occurs.
+Linear operations (basis transforms, squarings, affine transform) are applied independently per share.
+Only genuine GF(2⁴) multiplications require fresh randomness from the TRNG.
+
+The reason masking is applied at the input is that the basis transform T is a purely linear XOR network.
+If a₁ and a₀ were masked after T, the multiplication a₁·a₀ would still occur unmasked, leaking information.
+Therefore masking must be introduced *before the first multiplication*, so that D is never computed in the clear.
+
+=== Input Splitting
+
+Before any multiplication, a₁ and a₀ are split into two shares using TRNG outputs R₁ and R₂:
+
+----
+a₁ᵣ = R₁                 ← random mask from TRNG
+a₁ₘ = a₁ ⊕ a₁ᵣ           ← masked share
+
+a₀ᵣ = R₂                 ← random mask from TRNG
+a₀ₘ = a₀ ⊕ a₀ᵣ           ← masked share
+----
+
+At this point: `a₁ₘ ⊕ a₁ᵣ = a₁` and `a₀ₘ ⊕ a₀ᵣ = a₀`.
+
+== Masked Multiplication Gadget
+
+For any two masked operands `A = A₁ ⊕ A₂` and `B = B₁ ⊕ B₂`, the product `C = A·B` is computed using fresh randomness R from TRNG:
+
+----
+C₁ = A₁·B₁ ⊕ R
+C₂ = A₁·B₂ ⊕ A₂·B₁ ⊕ A₂·B₂ ⊕ R
+----
+
+Verification: `C₁ ⊕ C₂ = (A₁ ⊕ A₂)(B₁ ⊕ B₂) = A·B` ✓
+
+Neither C₁ nor C₂ individually reveals A·B. R cancels upon recombination.
+
+This is where the *True Random Number Generator (TRNG)* circuit provides fresh random values.
+
+== Computing D in Masked Form
+
+Recall: `D = a₁²λ ⊕ a₁a₀ ⊕ a₀²`
+
+=== Squaring Terms — Linear, Split for Free
+
+In GF(2⁴), squaring is a *linear map*, so it distributes across XOR:
+
+----
+a₁² = (a₁ₘ ⊕ a₁ᵣ)² = a₁ₘ² ⊕ a₁ᵣ²     ← no R needed
+a₀² = (a₀ₘ ⊕ a₀ᵣ)² = a₀ₘ² ⊕ a₀ᵣ²     ← no R needed
+----
+
+=== Multiplication Term — Apply Masked Multiplication Gadget with R₃
+
+----
+P₁ = a₁ₘ·a₀ₘ ⊕ R₃
+P₂ = a₁ₘ·a₀ᵣ ⊕ a₁ᵣ·a₀ₘ ⊕ a₁ᵣ·a₀ᵣ ⊕ R₃
+----
+
+Verification: `P₁ ⊕ P₂ = a₁·a₀` ✓
+
+=== Assembling D₁ and D₂
+
+----
+D₁ = a₁ₘ²·λ ⊕ P₁ ⊕ a₀ₘ²
+D₂ = a₁ᵣ²·λ ⊕ P₂ ⊕ a₀ᵣ²
+----
+
+Verification: `D₁ ⊕ D₂ = a₁²λ ⊕ a₁a₀ ⊕ a₀² = D` ✓
+
+*D is born already in masked form. It is never computed in the clear.*
+
+== Computing D⁻¹ in Masked Form
+
+Since GF(2⁴) has 16 elements: `D⁻¹ = D¹⁴ = D⁸ · D⁴ · D²`
+
+=== Squarings — Purely Linear, Zero Cost
+
+----
+D₁² , D₂²     →  shares of D²    (no R needed)
+D₁⁴ , D₂⁴     →  shares of D⁴    (no R needed)
+D₁⁸ , D₂⁸     →  shares of D⁸    (no R needed)
+----
+
+Verification: `D₁² ⊕ D₂² = (D₁ ⊕ D₂)² = D²` (linearity of squaring in GF(2⁴)) ✓
+
+=== First Masked Multiply — D⁸ · D⁴ using R₄
+
+----
+Q₁ = D₁⁸·D₁⁴ ⊕ R₄
+Q₂ = D₁⁸·D₂⁴ ⊕ D₂⁸·D₁⁴ ⊕ D₂⁸·D₂⁴ ⊕ R₄
+----
+
+Verification: `Q₁ ⊕ Q₂ = D⁸·D⁴` ✓
+
+=== Second Masked Multiply — (D⁸·D⁴) · D² using R₅
+
+----
+E₁ = Q₁·D₁² ⊕ R₅
+E₂ = Q₁·D₂² ⊕ Q₂·D₁² ⊕ Q₂·D₂² ⊕ R₅
+----
+
+Verification: `E₁ ⊕ E₂ = D⁸·D⁴·D² = D¹⁴ = D⁻¹` ✓
+
+== Computing A⁻¹ in Masked Form
+
+Need: `new_a₁ = D⁻¹·a₁` and `new_a₀ = D⁻¹·(a₁ ⊕ a₀)`
+
+=== Masked Multiply D⁻¹ · a₁ using R₆
+
+----
+F₁ = E₁·a₁ₘ ⊕ R₆
+F₂ = E₁·a₁ᵣ ⊕ E₂·a₁ₘ ⊕ E₂·a₁ᵣ ⊕ R₆
+----
+
+Verification: `F₁ ⊕ F₂ = D⁻¹·a₁ = new_a₁` ✓
+
+=== Masked Multiply D⁻¹ · (a₁ ⊕ a₀) using R₇
+
+----
+G₁ = E₁·(a₁ₘ ⊕ a₀ₘ) ⊕ R₇
+G₂ = E₁·(a₁ᵣ ⊕ a₀ᵣ) ⊕ E₂·(a₁ₘ ⊕ a₀ₘ) ⊕ E₂·(a₁ᵣ ⊕ a₀ᵣ) ⊕ R₇
+----
+
+Verification: `G₁ ⊕ G₂ = D⁻¹·(a₁ ⊕ a₀) = new_a₀` ✓
+
+== Optimized GF(2⁴) Squarer
+
+=== Why a Dedicated Squarer Is Better
+
+A general GF(2⁴) multiplier applied to `inp×inp` requires an xTimes chain with conditional XOR logic.
+Squaring in GF(2⁴) is a *linear operation* — the output bits are fixed XOR combinations of input bits.
+This collapses to a pure wiring network with only 2 XOR gates.
+
+=== Derivation for GF(2⁴) with Reduction Polynomial x⁴ + x + 1
+
+Let `inp = {a3, a2, a1, a0}`. Expanding `inp²`:
+
+----
+inp² = (a3x³ + a2x² + a1x + a0)²
+     = a3²x⁶ + a2²x⁴ + a1²x² + a0²
+----
+
+In GF(2), squaring coefficients is identity (0²=0, 1²=1), so:
+
+----
+inp² = a3·x⁶ + a2·x⁴ + a1·x² + a0
+----
+
+Reducing mod (x⁴ + x + 1):
+
+----
+x⁴ ≡ x + 1       → {0011}
+x⁵ ≡ x² + x      → {0110}
+x⁶ ≡ x³ + x²     → {1100}
+----
+
+Substituting:
+
+----
+inp² = a3·(x³+x²) + a2·(x+1) + a1·x² + a0
+     = a3x³ + (a3⊕a1)x² + a2x + (a2⊕a0)
+----
+
+Collecting coefficients:
+
+----
+out[3] = a3
+out[2] = a3 ⊕ a1
+out[1] = a2
+out[0] = a2 ⊕ a0
+----
+
+== Converting Back to AES Field
+
+After A⁻¹ is computed in masked share form:
+
+----
+{new_a1_share1, new_a0_share1}  →  T⁻¹  →  b_inv_share1
+{new_a1_share2, new_a0_share2}  →  T⁻¹  →  b_inv_share2
+----
+
+Since T⁻¹ is linear, it is applied independently to each share:
+
+----
+b⁻¹ = b_inv_share1 ⊕ b_inv_share2
+----
+
+== Final Affine Transformation
+
+The AES S-Box output is computed as:
+
+----
+b′ = A · b⁻¹ ⊕ c
+----
+
+Where:
+
+* `A` = fixed AES affine matrix
+* `c` = affine constant vector `{01100011}`
+
+This step is linear and applied independently per share:
+
+----
+b_prime_share1 = A * b_inv_share1 ^ c    ← c added once only to share 1
+b_prime_share2 = A * b_inv_share2
+
+b′ = b_prime_share1 ⊕ b_prime_share2
+----
+
+== Verification
+
+The S-Box output must match the official AES S-Box table defined in *FIPS-197*.
+
+Example test vector:
+
+----
+Input:  0x53
+Output: 0xED
+----
+
+All *256 possible inputs* must produce identical outputs to the standard AES S-Box.
+
+== References
+
+* *FIPS 197* — Advanced Encryption Standard (AES), NIST, 2001 (updated 2023). +
+  https://doi.org/10.6028/NIST.FIPS.197-upd1
+
+* *Canright, D.* — A Very Compact Rijndael S-box. Naval Postgraduate School Technical Report, 2005.

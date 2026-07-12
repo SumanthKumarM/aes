@@ -1,0 +1,20 @@
+# Sources are injected by block_lvl_synth_gen.py
+${READ_SOURCES}
+
+# Elaborate
+hierarchy -check -top ${BLOCK}
+proc
+opt
+memory
+opt
+techmap
+opt
+
+# Reports / stats
+stat
+
+# Schematic — produces ${BLOCK}_schematic.dot and then converted to pdf by py script
+show -format dot -prefix ${BLOCK}_schematic ${BLOCK}
+
+# Write netlist
+write_json ${BLOCK}_netlist.json

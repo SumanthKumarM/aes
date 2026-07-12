@@ -1,175 +1,46 @@
-# Composite Masked AES S-Box Implementation
-## Based on Canright Composite Field Inversion
+# Composite Masked AES
 
-This project implements a first-order masked AES S-Box using Canright's composite field inversion method.
-
-AES SubBytes transformation is defined as:
-
-b′ = A · b⁻¹ ⊕ c
-
-Where:
-- b⁻¹ is multiplicative inverse in GF(2⁸)
-- A is affine transformation matrix
-- c is affine constant vector
-
-The most complex part of this computation is finding b⁻¹ securely.  
-This implementation uses composite field arithmetic:
-
-GF(2⁸) ≅ GF((2⁴)²)
+A hardware implementation of the **AES block cipher** built around a **first-order masked S-Box** using **Canright's composite field inversion**, with an integrated **True Random Number Generator (TRNG)** supplying the fresh randomness needed for side-channel resistance.
 
 ---
 
-## Mathematical Foundations
+## Project Overview
 
-### Field Definitions
+This project implements AES-128/192/256 encryption as a pipeline of RTL blocks, each derived directly from FIPS 197 with a masked, side-channel-resistant datapath where it matters most — the S-Box.
 
-- AES field polynomial:
-  x⁸ + x⁴ + x³ + x + 1
+### Components
 
-- GF(2⁴) polynomial:
-  y⁴ + y + 1
-
-- Tower field polynomial:
-  x² + x + λ
-  where λ = 0x8 (as per Canright)
-
----
-
-## Implementation Steps
-
-### 1. Forward Basis Transformation
-
-Input byte $b \in GF(2^8)$ is mapped into tower representation:
-
-A(x) = a₁x + a₀
-
-Using fixed 8×8 matrix T:
-
-AES basis → Tower basis
-
-This is a linear transformation implemented using XOR networks.
+| Block | Description |
+|---|---|
+| **TRNG** | Generates the fresh randomness consumed by the masked S-Box. Draws physical entropy from a 32-oscillator ring oscillator array, passes it through RCT/APT health tests, and conditions it via Keccak-f[1600] into mask values. |
+| **S-Box** | Computes the AES `SubBytes` multiplicative inverse structurally over the composite field GF((2⁴)²), using Canright's basis decomposition. Every nonlinear step is first-order Boolean masked using randomness from the TRNG. |
+| **AddRoundKey / KeyExpansion** | Implements FIPS 197 `KeyExpansion()` and `AddRoundKey()` for all three standard key sizes (AES-128/192/256) using a rolling register bank, reusing the masked S-Box for the `SubWord()` step. |
+| **ShiftRows / MixColumns** | Combinational datapath blocks implementing the FIPS 197 `ShiftRows()` and `MixColumns()` transforms. |
+| **Cipher** | Top-level datapath that sequences the blocks above into the full FIPS 197 `Cipher()` round structure. |
 
 ---
 
-### 2. Compute Tower Field Denominator
+## Documentation
 
-D = a₁²λ ⊕ a₀a₁ ⊕ a₀²
-
-All operations performed in GF(2⁴).
+This README is intentionally brief. For the full technical documentation — design derivations, masking strategy, gadget-level detail, FSMs, and verification results for every block — go to the [`docs/`](docs/) directory.
 
 ---
 
-### 3. Compute D⁻¹ Using Exponentiation
+## Research Background
 
-Since GF(2⁴) has 16 elements:
+This project's design and verification approach is grounded in the following references:
 
-D⁻¹ = D¹⁴
+- **FIPS 197** — *Advanced Encryption Standard (AES)*, NIST, 2001 (updated 2023). https://doi.org/10.6028/NIST.FIPS.197-upd1
+- **Canright, D.** — *A Very Compact Rijndael S-box*, Naval Postgraduate School, 2005. (Composite field GF((2⁴)²) inversion structure used by the S-Box.). https://www.mdpi.com/1424-8220/25/6/1678
+- **Piscopo, V.; Dolmeta, A.; Mirigaldi, M.; Martina, M.; Masera, G.** — *A High-Entropy True Random Number Generator with Keccak Conditioning for FPGA*, Sensors, 25(6), 1678, 2025. https://doi.org/10.3390/s25061678 (Ring-oscillator TRNG architecture and Keccak conditioning approach adapted for the TRNG block.)
 
-Exponentiation is implemented as:
-
-D¹⁴ = D⁸ · D⁴ · D²
-
-Where:
-- Squaring operations are linear
-- Multiplications are nonlinear
 
 ---
 
-## Masking Strategy (First-Order Boolean Masking)
+## Tools & Simulation Environment
 
-To protect against power analysis attacks:
-
-D is split into two shares:
-
-D = D₁ ⊕ D₂
-
-All nonlinear multiplications use masked multiplication:
-
-C₁ = A₁B₁ ⊕ R  
-C₂ = A₁B₂ ⊕ A₂B₁ ⊕ A₂B₂ ⊕ R  
-
-Where:
-- R is fresh randomness
-- C = C₁ ⊕ C₂ gives correct result
-- Randomness cancels upon recombination
-
-Squaring is linear:
-
-(a ⊕ b)² = a² ⊕ b²
-
-So squaring is performed independently per share.
-
----
-
-### 4. Compute A⁻¹
-
-After obtaining D⁻¹:
-
-A⁻¹ = D⁻¹ · (a₁x + a₀)
-
-Which yields:
-
-new_a₁ = D⁻¹ · a₁  
-new_a₀ = D⁻¹ · a₀  
-
-All operations in GF(2⁴).
-
-Masked multipliers are used here as well.
-
----
-
-### 5. Inverse Basis Transformation
-
-The inverted tower element:
-
-(new_a₁, new_a₀)
-
-is converted back to AES polynomial basis using fixed matrix T⁻¹.
-
-This is again a linear XOR network.
-
----
-
-### 6. Affine Transformation
-
-Final SubBytes output is computed as:
-
-b′ = A · b⁻¹ ⊕ c
-
-Where:
-- A is fixed 8×8 affine matrix
-- c is constant vector
-- Linear operation (safe for masking)
-
----
-
-## Security Notes
-
-- All nonlinear GF(2⁴) multiplications are masked.
-- Fresh randomness is injected per multiplication.
-- Linear transformations (basis + affine) are applied per share independently.
-- Shares must never be recombined internally before final output.
-
----
-
-## Verification Requirement
-
-The final S-Box must match the official AES S-Box table exactly.
-
-Example test vector:
-
-S(0x53) = 0xED
-
-All 256 values must match FIPS-197 specification.
-
----
-
-## Design Characteristics
-
-- Composite field inversion (area efficient)
-- First-order Boolean masking
-- No lookup tables
-- XOR + AND based arithmetic
-- Suitable for ASIC side-channel resistant implementations
-
----
+| Purpose | Tool |
+|---|---|
+| **Compiler / Simulator** | [Verilator](https://www.veripool.org/verilator/) — compiles the SystemVerilog RTL into a cycle-accurate C++ simulation model. |
+| **Verification Framework** | [cocotb](https://www.cocotb.org/) (Python) — drives the Verilator model and implements all testbenches, checkers, and coverage. |
+| **Linting & Synthesis** | [Xilinx Vivado](https://www.xilinx.com/products/design-tools/vivado.html) — RTL linting and FPGA synthesis. |
