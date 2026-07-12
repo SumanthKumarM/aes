@@ -23,8 +23,6 @@ docs/sbox.pdf
 docs/sbox.html
 docs/trng.html
 docs/trng.pdf
-docs/aes.pdf
-docs/aes.html
 docs/keyExp_logic.html
 docs/keyExp_logic.pdf
 lint/*.jou
