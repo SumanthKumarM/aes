@@ -13,10 +13,10 @@ module mixColumns(
     function automatic logic [3:0][7:0] column_op(input logic [3:0][7:0] b);
         logic [3:0][7:0] b_temp;
 
-        b_temp[0] = xTimes(b[0]) ^ (xTimes(b[1]) ^ b[1]) ^ b[2] ^ b[3];
-        b_temp[1] = b[0] ^ xTimes(b[1]) ^ (xTimes(b[2]) ^ b[2]) ^ b[3];
-        b_temp[2] = b[0] ^ b[1] ^ xTimes(b[2]) ^ (xTimes(b[3]) ^ b[3]);
-        b_temp[3] = (xTimes(b[0]) ^ b[0]) ^ b[1] ^ b[2] ^ xTimes(b[3]);
+        b_temp[3] = xTimes(b[3]) ^ (xTimes(b[2]) ^ b[2]) ^ b[1] ^ b[0];
+        b_temp[2] = b[3] ^ xTimes(b[2]) ^ (xTimes(b[1]) ^ b[1]) ^ b[0];
+        b_temp[1] = b[3] ^ b[2] ^ xTimes(b[1]) ^ (xTimes(b[0]) ^ b[0]);
+        b_temp[0] = (xTimes(b[3]) ^ b[3]) ^ b[2] ^ b[1] ^ xTimes(b[0]);
 
         return b_temp;
     endfunction

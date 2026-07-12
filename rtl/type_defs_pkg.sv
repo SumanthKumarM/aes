@@ -13,8 +13,16 @@ package type_defs_pkg;
         SQUEEZE
     } Keccak_states;
 
+    typedef enum logic [1:0] {
+        IDLE, 
+        BIST,
+        WAIT_FOR_XFER,
+        DEAD
+    } cu_states;
+
     typedef enum logic [2:0] {
-        TOWER_FIELD, 
+        INIT,
+        TOWER_FIELD,
         MASKED_D,
         MASKED_D_INV,
         MASKED_A_INV,

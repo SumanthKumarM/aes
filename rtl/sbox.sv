@@ -1,10 +1,12 @@
 /**
- * This Sbox module is parameterized to work with whole state matrix and with a single word (32-bits) itself
- * The reason this block is parameterized is AddRoundKey also uses this Sbox to compute subBytes of word in KeyExpansion logic
- * Sbox needs 448 random bits when it's operating on whole state matrix because each byte uses 28 random bits. 
- * When operating on word it only needs 112 random bits. So random number input port is also parameterized accordingly
+ * This Sbox module is designed to operate on both state matrix and a single word (32-bits) itself.
+ * The reason this block is designd that way is AddRoundKey also uses this Sbox to compute subBytes of word in KeyExpansion logic.
+ * Sbox needs 448 random bits when it's operating on state matrix because each byte uses 28 random bits. 
+ * When operating on word it only needs 112 random bits. So random number input port accountes for both accordingly.
  * When Sbox is working with only a single word then it doesn't need VALID signal from TRNG because all required random bits are provided
-   upfront in CIPHER block. So, it doesn't have to drive READY signal as it's not looking for any handshake with TRNG
+   upfront in CIPHER block. So, it doesn't have to drive READY signal as it's not looking for any handshake with TRNG.
+ * 2 enable signals are present in port list which are enb_n and _enb_n. When enb_n is low whole SBox is enabled and when _enb_n is low only 
+   a portion of SBox is enabled. Both of enable signals can't be low, this is an invalid configuration.
 **/
 
 import type_defs_pkg::*;
@@ -58,7 +60,7 @@ package sbox_funcs;
         return p;
     endfunction
 
-    // converting bytes to tower field representation and computing their masks
+    // converting bytes to tower field representation and computing their masks (basis transformation)
     function automatic ubyte tower_field(
         input ubyte s_byte,  // raw state array element
         input ubyte rand_byte);  // random numbers used in masking tower field elements {a1r, a0r}
@@ -234,20 +236,19 @@ package sbox_funcs;
     endfunction
 endpackage
 
-/**
- * this SBox takes whole state matrix as input and computes subBytes for each element in state matrix
- * this has VALID-READY handshake with TRNG to receive random bits from TRNG
-**/
-module sbox_128(
+module sbox(
     output logic [127:0] subBytes,  // subByte of each element of state array
     output logic sbox_ready,  // tells trng that s-box is ready to accept random bits
-    output logic sbox_done,  // indicates that Sbox has computed required subBytes
+    output logic sbox_done_pulse,  // indicates that Sbox has computed required subBytes
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
     input logic [127:0] state,  // 128-bit input state matrix to s-box
-    input logic [1343:0] rand_num,  // random bits from TRNG
+    input logic [1679:0] rand_num,  // random bits from TRNG
     input logic trng_key_valid,  // asserted by TRNG when it has random bits to give to s-box
-    input logic enb_n, rst_n, clk);  
+    input logic proceed,  // asserted by CIPHER/AddRoundKey to allow SBox to advance to next state only when CIPHER/AddRoundKey has aknowledged
+    input logic enb_n,  // this signal enables all of SBox which can operate on state matrix
+    input logic _enb_n,  // this signal enable only a portion of SBox which is enough to process a 32-bit word
+    input logic rst_n, clk);  
 
     import sbox_funcs::*;
 
@@ -257,7 +258,8 @@ module sbox_128(
     logic [255:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [255:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
     logic [1:0] sbox_cntr;  // keeps track of how many times Sbox has computed subBytes
-    logic [9:0] slice_sel;  // required to select particular slice of rand_num
+    logic sbox_done, sbox_done_d;  // these are registered done signals which stay high more than 1 cycle
+    logic [10:0] slice_sel;  // required to select particular slice of rand_num
     sbox_states fsm_state;
     genvar i;
 
@@ -267,63 +269,72 @@ module sbox_128(
             sbox_ready <= 0;
             rst_trng <= 0;
             sbox_done <= 0;
+            sbox_done_d <= 0;
             sbox_cntr <= 0;
-            fsm_state <= TOWER_FIELD;
+            fsm_state <= INIT;
         end
         else begin
-            if(!enb_n) begin  // since Sbox is enable it will continue to operate
+            if((!enb_n && _enb_n) || (enb_n && !_enb_n)) begin  // whole SBox or SBox that operates on a word is enabled which operates on state matrix
                 case(fsm_state)
-                    TOWER_FIELD: begin
-                        sbox_ready <= (sbox_cntr == 0) ? 1 : 0;  // s-box is ready to accept random bits only when all 1344 random bits are consumed
+                    INIT: begin  // this state handles the handshake and accepting SBox inputs
+                        // s-box is ready to accept random bits only when all random bits are consumed and this signal functions only when enb_n = 0 else it freezes
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : ((sbox_cntr == 0) ? 1 : 0);
                         rst_trng <= 0;
                         sbox_done <= 0;
+
                         if(trng_dead_flag) fsm_state <= RESET_TRNG;
-                        else fsm_state <= (trng_key_valid) ? MASKED_D : TOWER_FIELD;
+                        else begin
+                            if(enb_n && !_enb_n) fsm_state <= TOWER_FIELD;  // when only portion of SBox is required
+                            else begin  // when whole SBox is enabled
+                                if(sbox_cntr == 0) fsm_state <= (trng_key_valid) ? TOWER_FIELD : INIT;
+                                else fsm_state <= TOWER_FIELD;
+                            end
+                        end
+                    end
+                    TOWER_FIELD: begin
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        rst_trng <= 0;
+                        sbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D;
                     end 
                     MASKED_D: begin
-                        sbox_ready <= 0;
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                     end
                     MASKED_D_INV: begin
-                        sbox_ready <= 0;
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                     end
                     MASKED_A_INV: begin
-                        sbox_ready <= 0;
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                     end
                     MASKED_B_INV: begin
-                        sbox_ready <= 0;
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                     end
                     SUB_BYTES: begin
-                        sbox_ready <= 0;
+                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
                         rst_trng <= 0;
-                        sbox_cntr <= (sbox_cntr == 2) ? 0 : sbox_cntr + 1;  // updating since Sbox has computed subBytes
+                        sbox_cntr <= (enb_n && !_enb_n) ? sbox_cntr : ((sbox_cntr == 2) ? 0 : sbox_cntr + 1);  // updating since Sbox has computed subBytes only when enb_n is low
                         sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
+                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : ((proceed) ? INIT : SUB_BYTES);  // Sbox will advance to next state only when CIPHER/AddRoundKey has aknowledged
                     end
                     RESET_TRNG: begin
-                        sbox_ready <= 0;
                         rst_trng <= 1;  // resets TRNG as fatal failure has occurred
+                        sbox_ready <= 0;
                         sbox_done <= 0;
-                        fsm_state <= TOWER_FIELD;
+                        sbox_cntr <= 0;
+                        fsm_state <= INIT;
                     end
-                    default: begin
-                        sbox_ready <= 0; 
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        if(trng_dead_flag) fsm_state <= RESET_TRNG;
-                        else fsm_state <= (trng_key_valid) ? MASKED_D : TOWER_FIELD;
-                    end 
                 endcase
             end
             else begin  // as Sbox is disabled it will freeze it's state
@@ -333,22 +344,26 @@ module sbox_128(
                 sbox_cntr <= sbox_cntr;
                 fsm_state <= fsm_state;  // state has been freezed or on hold
             end
+
+            sbox_done_d <= sbox_done;  // 1 cycle delayed version of sbox_done is used to generate a pulse of 1 clock cycle when Sbox has computed subBytes
         end
     end
 
     // slice_sel helps to select required 448-bit slice of rand_num 
     always_comb begin
         case(sbox_cntr)
-            2'b00: slice_sel = 0;
-            2'b01: slice_sel = 448;
-            2'b10: slice_sel = 896;
+            2'b00: slice_sel = (!enb_n && _enb_n) ? 0 : ((enb_n && !_enb_n) ? 448 : 0);
+            2'b01: slice_sel = (!enb_n && _enb_n) ? 560 : ((enb_n && !_enb_n) ? 1008 : 0);
+            2'b10: slice_sel = (!enb_n && _enb_n) ? 1120 : ((enb_n && !_enb_n) ? 1568 : 0);
             default: slice_sel = 0;
         endcase
     end
 
+    assign sbox_done_pulse = sbox_done && !sbox_done_d;  // generating a pulse of 1 clock cycle when Sbox has computed subBytes
+
     // this block computes corresponding values for every byte of input state array
     generate
-        for(i=0; i<16; i++) begin
+        for(i=0; i<4; i++) begin  // this portion is common for both modes
             always_ff@(posedge clk) begin
                 if(!rst_n) begin
                     masked_a_byte[(8*i) +: 8] <= 0;
@@ -359,18 +374,25 @@ module sbox_128(
                     subBytes[(8*i) +: 8] <= 0;
                 end
                 else begin
-                    if(!enb_n) begin  // since Sbox is enable it will continue to operate
+                    if((!enb_n && _enb_n) || (enb_n && !_enb_n)) begin  // since Sbox is enable it will continue to operate
                         // the combinational block is broken into individual fsm states so that clock time peroid
                         // can be >= worst individual sub block's critical path delay instead of sum of delays of all sub blocks
                         case(fsm_state)
-                            // initial state which receives random bits from TRNG and performs tower field inversion
+                            INIT: begin  // this state doesn't handle any computation, it just handles handshake and accepting inputs
+                                masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
+                                denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
+                                masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
+                                masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                                masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
+                                subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
+                            end
                             TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel) +: 4], rand_num[((28*i)+12+slice_sel) +: 4]});
                             MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel) +: 4], rand_num[((28*i)+20+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
                             SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
-                            default: begin  
+                            default: begin
                                 masked_a_byte[(8*i) +: 8] <= 0;
                                 denominator[(8*i) +: 8] <= 0;
                                 masked_d_inv[(8*i) +: 8] <= 0;
@@ -391,111 +413,8 @@ module sbox_128(
                 end
             end
         end
-    endgenerate
-endmodule
 
-/**
- * this SBox takes a 32-bit word as input and computes subBytes for each byte in word
- * this has no VALID-READY handshake with TRNG to receive random bits from TRNG because these random bits are available upfront in CIPHER
-**/
-module sbox_32(
-    output word_t subBytes,  // subByte of each element of state array
-    output logic sbox_done,  // indicates that Sbox has computed required subBytes
-    output logic rst_trng,  // resets TRNG when health test results in fatal failures
-    input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
-    input word_t state,  // 128-bit input state matrix to s-box
-    input logic [335:0] rand_num,  // random bits from TRNG
-    input logic enb_n, rst_n, clk);  
-
-    import sbox_funcs::*;
-
-    word_t masked_a_byte; // to store a1 and a0
-    word_t denominator;  // stores denominator value corresponding to every state element
-    word_t masked_d_inv;  // stores inverse of denominator of every state element
-    logic [63:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
-    logic [63:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
-    logic [1:0] sbox_cntr;  // keeps track of how many times Sbox has computed subBytes
-    ubyte slice_sel;  // required to select particular slice of rand_num
-    sbox_states fsm_state;
-    genvar i;
-
-    // separate sequental block is used to update FSM states, sbox_done and rst_trng so as to avoid being driven for multiple times
-    always_ff @(posedge clk) begin
-        if(!rst_n) begin
-            rst_trng <= 0;
-            sbox_done <= 0;
-            sbox_cntr <= 0;
-            fsm_state <= TOWER_FIELD;
-        end
-        else begin
-            if(!enb_n) begin  // since Sbox is enable it will continue to operate
-                case(fsm_state)
-                    TOWER_FIELD: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        // since random bits are already provided in CIPHER, it doesn't need to wait for TRNG valid
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D;
-                    end 
-                    MASKED_D: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
-                    end
-                    MASKED_D_INV: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
-                    end
-                    MASKED_A_INV: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
-                    end
-                    MASKED_B_INV: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
-                    end
-                    SUB_BYTES: begin
-                        rst_trng <= 0;
-                        sbox_cntr <= (sbox_cntr == 2) ? 0 : sbox_cntr + 1;  // updating since Sbox has computed subBytes
-                        sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : TOWER_FIELD;
-                    end
-                    RESET_TRNG: begin
-                        rst_trng <= 1;  // resets TRNG as fatal failure has occurred
-                        sbox_done <= 0;
-                        fsm_state <= TOWER_FIELD;
-                    end
-                    default: begin
-                        rst_trng <= 0;
-                        sbox_done <= 0;
-                        fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D;
-                    end 
-                endcase
-            end
-            else begin  // as Sbox is disabled it will freeze it's state
-                rst_trng <= 0;  // as Sbox is disabled, it's not going to drive TRNG's reset
-                sbox_done <= 0;  // as Sbox is in freeze state it's not going to assert done signal
-                sbox_cntr <= sbox_cntr;
-                fsm_state <= fsm_state;  // state has been freezed or on hold
-            end
-        end
-    end
-
-    // slice_sel helps to select required 448-bit slice of rand_num 
-    always_comb begin
-        case(sbox_cntr)
-            2'b00: slice_sel = 0;
-            2'b01: slice_sel = 112;
-            2'b10: slice_sel = 224;
-            default: slice_sel = 0;
-        endcase
-    end
-
-    // this block computes corresponding values for every byte of input state array
-    generate
-        for(i=0; i<4; i++) begin
+        for(i=4; i<16; i++) begin  // this portion is only functional when SBox is supposed to operate on state matrix
             always_ff@(posedge clk) begin
                 if(!rst_n) begin
                     masked_a_byte[(8*i) +: 8] <= 0;
@@ -506,18 +425,25 @@ module sbox_32(
                     subBytes[(8*i) +: 8] <= 0;
                 end
                 else begin
-                    if(!enb_n) begin  // since Sbox is enable it will continue to operate
+                    if(!enb_n && _enb_n) begin  // since whole Sbox is enabled it will continue to operate on state matrix
                         // the combinational block is broken into individual fsm states so that clock time peroid
                         // can be >= worst individual sub block's critical path delay instead of sum of delays of all sub blocks
                         case(fsm_state)
-                            // initial state which receives random bits from TRNG and performs tower field inversion
+                            INIT: begin  // this state doesn't handle any computation, it just handles handshake and accepting inputs
+                                masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
+                                denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
+                                masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
+                                masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                                masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
+                                subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
+                            end
                             TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel) +: 4], rand_num[((28*i)+12+slice_sel) +: 4]});
                             MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel) +: 4], rand_num[((28*i)+20+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
                             MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
                             SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
-                            default: begin  
+                            default: begin
                                 masked_a_byte[(8*i) +: 8] <= 0;
                                 denominator[(8*i) +: 8] <= 0;
                                 masked_d_inv[(8*i) +: 8] <= 0;

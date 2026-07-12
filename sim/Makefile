@@ -14,7 +14,6 @@ $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doe
 export PYTHONPATH := $(TB_DIR):$(SIM_DIR):$(PYTHONPATH)
 
 # Cocotb setup
-COCOTB_TEST_MODULES = addRoundKey_tb
 SIM = verilator
 
 # Linting Tools 
@@ -35,27 +34,49 @@ VIVADO_SYNTH = vivado -mode batch -notrace -journal $(SYNTH_DIR)/vivado.jou -log
 EXTRA_ARGS += --trace --trace-structs 
 COMPILE_ARGS += -I$(RTL_DIR) --timescale 1ps/1ps --timing --x-initial unique --x-assign 0
 
-# generate parameter package file if it misses
-$(TRNG_PARAM_FILE): gen_param
+# generate parameter package file only when missing or stale -- a real file
+# rule (not PHONY) so nested $(MAKE) invocations don't regenerate it repeatedly
+$(TRNG_PARAM_FILE): $(SIM_DIR)/gen_param.py
+	@echo "Generating RTL parameters..."
+	python3 $(SIM_DIR)/gen_param.py
+
+# Verification-only top wrappers (connect a block to a real TRNG instance for
+# cocotb simulation). Generated on demand by gen_top.py; never committed to
+# git, and never used by lint/synth/standalone RTL compilation -- those only
+# ever see the real design files referenced below.
+GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top
 
 # RTL sources
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG)
 
-ifneq ($(filter $(block),trng trng_sbox_top),)
+ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
-    VERILOG_SOURCES += $(TRNG_PARAM_FILE) 
+    VERILOG_SOURCES += $(TRNG_PARAM_FILE)
 endif
 
-ifeq ($(block),trng_sbox_top)
+ifeq ($(block),sbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),addRoundKey_top)
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),addRoundKey)
     VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),cipher_top)
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else
 	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
 endif
+
+# Default TOPLEVEL to the block under test; override with TOPLEVEL=... if needed
+TOPLEVEL ?= $(block)
+
+# Map each block to its cocotb test module. Testbenches are named after the
+# design block under test, not the generated verification wrapper, so strip a
+# trailing "_top" when deriving the module name (sbox_top -> sbox_tb,
+# addRoundKey_top -> addRoundKey_tb, cipher_top -> cipher_tb).
+COCOTB_TEST_MODULES ?= $(patsubst %_top,%,$(block))_tb
 
 # handle specific test selection
 ifneq ($(test),)
@@ -67,33 +88,36 @@ endif
 all: run_all
 
 .PHONY: gen_param
-gen_param:
-	@echo "Generating RTL parameters..."
-	python $(SIM_DIR)/gen_param.py
+gen_param: $(TRNG_PARAM_FILE)
 
-# RTL compilation marker - indicates RTL has been compiled
-RTL_COMPILED_MARKER = sim_build/.rtl_compiled
+# Generates the verification-only top wrapper for $(block), when $(block) is
+# one of GENERATED_TOP_BLOCKS. A no-op otherwise -- lint/synth/compile_rtl
+# never depend on this target, so base block names are unaffected either way.
+.PHONY: gen_top
+gen_top:
+ifneq ($(filter $(block),$(GENERATED_TOP_BLOCKS)),)
+	@echo "Generating verification top module '$(block).sv'..."
+	python3 $(RTL_DIR)/gen_top.py $(block)
+endif
 
-# RTL compilation (generates C++ files and binaries)
+# Standalone RTL elaboration check (Verilator only, no cocotb linkage). This is
+# independent of run_test/run_all: cocotb's own `sim` target (pulled in below)
+# already compiles incrementally via Make's normal file-mtime tracking, so
+# nothing here needs to duplicate that compile.
 .PHONY: compile_rtl
 compile_rtl: $(BLOCK_DEPS)
 	@echo "Compiling RTL for $(block) with Verilator..."
 	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) -I$(RTL_DIR) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
-	@mkdir -p sim_build && touch $(RTL_COMPILED_MARKER)
 	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
 
-# Dependency: Only compile RTL if not already compiled
-$(RTL_COMPILED_MARKER): $(BLOCK_DEPS)
-	$(MAKE) compile_rtl
-
 .PHONY: run_all
-run_all: $(RTL_COMPILED_MARKER)
-	@echo "Running all tests (using pre-compiled RTL)..."
+run_all: gen_top $(BLOCK_DEPS)
+	@echo "Running all tests..."
 	$(MAKE) sim 2>&1 | tee sim.log
 
 .PHONY: run_test
-run_test: $(RTL_COMPILED_MARKER)
-	@echo "Running specific test: $(test) (using pre-compiled RTL)"
+run_test: gen_top $(BLOCK_DEPS)
+	@echo "Running specific test: $(test)"
 	$(MAKE) sim 2>&1 | tee sim.log
 
 # cocotb inclusion -

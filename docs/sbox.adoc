@@ -147,10 +147,10 @@ Therefore masking must be introduced *before the first multiplication*, so that 
 Before any multiplication, a₁ and a₀ are split into two shares using TRNG outputs R₁ and R₂:
 
 ----
-a₁ᵣ = R₁                  ← random mask from TRNG
+a₁ᵣ = R₁                 ← random mask from TRNG
 a₁ₘ = a₁ ⊕ a₁ᵣ           ← masked share
 
-a₀ᵣ = R₂                  ← random mask from TRNG
+a₀ᵣ = R₂                 ← random mask from TRNG
 a₀ₘ = a₀ ⊕ a₀ᵣ           ← masked share
 ----
 

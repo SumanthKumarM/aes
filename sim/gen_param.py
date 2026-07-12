@@ -5,11 +5,10 @@ from scipy.stats import binom
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # configuration
-CONSECUTIVE_ERRORS = 3  # number consecutive errors in health tests
-DRBG_CYCLES = 1024      # number of cycles the Keccak block uses feedback
+DRBG_CYCLES = 1024     # number of cycles the Keccak block uses feedback
 
-# health tests parameters as per IST standard
-ALPHA = 0.01           # false positive probability (NIST standard)
+# health tests parameters as per NIST SP 800-90B standard
+ALPHA = 2**(-20)       # false positive probability (NIST SP 800-90B recommended: ~2^-20)
 H_MIN = 0.9982         # measured min-entropy per bit (your design's measured value)
 APT_BIT_WINDOW = 1024  # APT window size (fixed by NIST SP 800-90B for binary sources)
 # p = most likely symbol probability, derived from min-entropy
@@ -95,9 +94,7 @@ lines.append(f"  // NIST SP 800-90B Adaptive Proportion Test (APT) bit window")
 lines.append(f"  localparam int APT_BIT_WINDOW = {APT_BIT_WINDOW};")
 lines.append(f"  // NIST SP 800-90B Adaptive Proportion Test (APT) Threshold")
 lines.append(f"  localparam int APT_THRESHOLD = {APT_THRESHOLD};")
-lines.append(f"  // number consecutive errors in health tests")
-lines.append(f"  localparam int CONSECUTIVE_ERRORS = {CONSECUTIVE_ERRORS};")
-lines.append(f"  // number of cycles the Keccak block uses feedback")
+lines.append(f"  // number of cycles the Keccak block uses DRBG feedback before sampling fresh entropy")
 lines.append(f"  localparam int DRBG_CYCLES = {DRBG_CYCLES};")
 lines.append("")
 lines.append("  // RHO_OFFSETS[row][col] - Fixed rotation constants for Keccak/SHA3")
@@ -132,5 +129,4 @@ print(f"Generated '{OUTPUT_FILE}'")
 print(f"  RCT Threshold     : {RCT_THRESHOLD}")
 print(f"  APT BIT WINDOW    : {APT_BIT_WINDOW}")
 print(f"  APT Threshold     : {APT_THRESHOLD}")
-print(f"  Consecutive errors: {CONSECUTIVE_ERRORS}")
 print(f"  DRBG CYCLES       : {DRBG_CYCLES}")

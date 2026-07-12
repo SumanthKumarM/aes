@@ -103,12 +103,15 @@ Each clock cycle produces one raw entropy bit.
 
 The raw entropy stream is continuously monitored using runtime health tests to ensure the entropy source has not failed or become biased.
 
+*Runtime Error Handling:* If either test fails, the TRNG immediately transitions to an **unrecoverable DEAD state**, halting all key generation. The device requires an external reset (`ext_rst_n`) to resume operation. No error recovery is attempted — any detected anomaly is treated as a critical malfunction.
+
 === Repetition Count Test (RCT)
 
 * *Purpose:* Detects if the entropy source becomes "stuck."
 * *Mechanism:* Monitors and counts consecutive identical bits in the stream.
 * *Failure Condition:* If the repetition count exceeds a predefined threshold, an error is raised.
 * *Example Failure:* `111111111111111111...`
+* *Action on Failure:* TRNG enters DEAD state → waits for external reset.
 
 === Adaptive Proportion Test (APT)
 
@@ -116,6 +119,21 @@ The raw entropy stream is continuously monitored using runtime health tests to e
 * *Window Size:* *1024 bits* (per *NIST* standard).
 * *Mechanism:* Operates within a sliding window to check the statistical distribution of bits.
 * *Failure Condition:* If the number of `1` bits exceeds a calculated statistical threshold, the entropy source is considered faulty.
+* *Action on Failure:* TRNG enters DEAD state → waits for external reset.
+
+== Control Unit FSM
+
+The Control Unit manages the TRNG state machine with a *fail-fast error handling model*:
+
+* *IDLE:* Warm-up state; noise source and health tests are disabled; keccak held in reset.
+* *BIST:* Built-in Self-Test; health tests monitor the raw bitstream; keccak processes entropy.
+  - If `health_error` asserted → immediately transition to DEAD (no recovery).
+* *WAIT_FOR_XFER:* Awaiting handshake from Sbox; key output is available.
+  - If `health_error` asserted → immediately transition to DEAD.
+* *DEAD:* Unrecoverable failure state; all outputs disabled; device halts key generation.
+  - Remains in DEAD until external reset (`ext_rst_n` assertion).
+
+*Design Philosophy:* Errors are fatal. This simplifies the implementation and ensures that any detected anomaly immediately prevents further random generation, protecting against side-channel leakage from a compromised entropy source.
 
 == Entropy Collector
 
@@ -302,4 +320,4 @@ These random values protect masked AES operations against side-channel attacks.
 
 * *Ring Oscillator Based True Random Number Generator with Keccak Conditioning* +
   Sensors Journal (MDPI), 2025. +
-  https://www.mdpi.com/1424-8220/25/5/1678
+  https://www.mdpi.com/1424-8220/25/6/1678

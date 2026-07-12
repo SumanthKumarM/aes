@@ -1,7 +1,16 @@
 """
-Cocotb testbench for addRoundKey module.
+Cocotb testbench for the addRoundKey module, verified through the
+auto-generated addRoundKey_top wrapper (addRoundKey + word-mode SBox + real TRNG).
 
 NIST FIPS 197 compliance: AESReferenceModel is the golden reference for all test comparisons.
+
+DUT (addRoundKey_top) interface notes:
+  - The TRNG is a real instance: it is fed by raw_rand_bit (noise driver on
+    sampling_clk); rand_num / trng_key_valid / trng_dead_flag are NOT inputs anymore.
+  - In word mode (KeyExpansion path) the SBox never handshakes with the TRNG
+    (sbox_ready stays low), so rand_num content is irrelevant to functional
+    correctness -- the masking shares cancel out regardless.
+  - ark_enb_n must be driven low to enable addRoundKey.
 
 RTL data representation notes:
   - state_matrix_t = logic [3:0][3:0][7:0]: state[row][col] at bits (row*4+col)*8
@@ -11,14 +20,16 @@ RTL data representation notes:
   - Testbench applies row inversion in plaintext_to_rtl_state() to match this convention
 
 AES-192 concat_sel pattern (from RTL concatenate_sel function):
-  - concat_sel=01: rounds 1,4,7,10  → new key expansion, sbox enabled
-  - concat_sel=10: rounds 3,6,9,12  → new key expansion, sbox enabled
-  - concat_sel=11: rounds 2,5,8,11  → bypass (sbox_enb_n=1, reuse prev keys)
+  - concat_sel=01: rounds 1,4,7,10  → new key expansion, sbox enabled (sbox_enb_n=2'b10)
+  - concat_sel=10: rounds 3,6,9,12  → new key expansion, sbox enabled (sbox_enb_n=2'b10)
+  - concat_sel=11: rounds 2,5,8,11  → bypass (sbox_enb_n=2'b11, reuse prev keys)
 
-Signal access notes (Verilator):
-  - dut.sbox_done, dut.sbox_enb_n, dut.subByte, dut.sbox_state  -- internal wires
-  - dut.prev_expKey                                             -- internal register (256-bit)
-  - dut.Sbox.fsm_state                                          -- sbox instance internal
+Signal access notes (Verilator, --public-flat-rw):
+  - dut.sbox_done_pulse, dut.sbox_enb_n, dut.subByte, dut.sbox_state  -- top-level ports
+    (sbox_done_pulse is a single-cycle pulse, not a level; addRoundKey_top wires
+    ark_done back into Sbox's proceed input internally, so no TB handshake needed)
+  - dut.rst_trng, dut.trng_dead_flag                            -- top-level internal wires
+  - dut.AddRoundKey.prev_expKey                                 -- internal register (256-bit)
 """
 
 import cocotb
@@ -28,14 +39,19 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 
 # Simulation constants
-CLK_PERIOD_NS = 10
-RESET_CYCLES  = 8
-SBOX_LATENCY  = 6     # TOWER_FIELD → MASKED_D → ... → SUB_BYTES (6 edges)
-SBOX_TIMEOUT  = 20    # max cycles to wait for sbox_done
+CLK_PERIOD_NS  = 10   # main clock
+SCLK_PERIOD_NS = 2    # sampling clock for the TRNG noise source
+RESET_CYCLES   = 8
+SBOX_LATENCY   = 7    # INIT → TOWER_FIELD → MASKED_D → ... → SUB_BYTES (7 edges in word mode)
+SBOX_TIMEOUT   = 20   # max cycles to wait for sbox_done
 
 KEY_SIZE_128 = 0b01
 KEY_SIZE_192 = 0b10
 KEY_SIZE_256 = 0b11
+
+# sbox_enb_n encodings driven by addRoundKey (comb from round_num/key_size)
+SBOX_DISABLED  = 0b11  # round 0 / AES-192 bypass rounds / invalid key size
+SBOX_WORD_MODE = 0b10  # KeyExpansion word-mode transformation active
 
 _mon_log = logging.getLogger("cocotb.monitor")
 
@@ -258,63 +274,60 @@ def get_expkey_word(expkey_int, word_idx):
         result |= byte << (row*8)
     return result
 
+# Noise source for the real TRNG instance inside addRoundKey_top
+class NoiseBitBuffer:
+    """Random bit stream for raw_rand_bit. Prefers the physics-based
+    noise_source_model.py (on PYTHONPATH via the sim dir); falls back to
+    a seeded PRNG when it isn't available."""
+
+    def __init__(self, n_bits=20000, seed=None):
+        self._seed = seed if seed is not None else random.getrandbits(32)
+        self._idx = 0
+        try:
+            from noise_source_model import TRNGNoiseSource
+            src = TRNGNoiseSource(n_ro=32, n_inv=13, fs_MHz=150.0, seed=self._seed)
+            self._buf = [int(b) for b in src.generate_bits(n_bits)]
+            cocotb.log.info(f"[NoiseBitBuffer] physics model, {n_bits} bits, seed={self._seed}")
+        except ImportError as e:
+            rng = random.Random(self._seed)
+            self._buf = [rng.getrandbits(1) for _ in range(n_bits)]
+            cocotb.log.warning(f"[NoiseBitBuffer] physics model unavailable ({e}); PRNG fallback")
+
+    def next_bit(self):
+        b = self._buf[self._idx]
+        self._idx = (self._idx + 1) % len(self._buf)
+        return b
+
+async def noise_driver(dut, seed=None):
+    """Drive raw_rand_bit with fresh noise on every sampling_clk edge."""
+    buf = NoiseBitBuffer(seed=seed)
+    while True:
+        await RisingEdge(dut.sampling_clk)
+        dut.raw_rand_bit.value = buf.next_bit()
+
 # DUT control helpers
-def start_clock(dut):
+def start_clocks(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    cocotb.start_soon(Clock(dut.sampling_clk, SCLK_PERIOD_NS, unit="ns").start())
 
 async def reset_dut(dut):
-    dut.rst_n.value          = 0
-    dut.round_num.value      = 0
-    dut.key_size.value       = 0
-    dut.state.value          = 0
-    dut.master_key.value     = 0
-    dut.rand_num.value       = 0
-    dut.trng_key_valid.value = 0
-    dut.trng_dead_flag.value = 0
+    dut.rst_n.value        = 0
+    dut.round_num.value    = 0
+    dut.key_size.value     = 0
+    dut.state.value        = 0
+    dut.master_key.value   = 0
+    dut.raw_rand_bit.value = 0
+    dut.ark_enb_n.value    = 0  # keep addRoundKey enabled
     await ClockCycles(dut.clk, RESET_CYCLES)
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
     dut._log.info("DUT reset complete")
 
-async def trng_model(dut):
-    """
-    TRNG model driver for masked sbox.
-
-    Critical behavior: rand_num must be stable from TOWER_FIELD through MASKED_A_INV.
-    sbox uses rand_num bits in both tower_field() and masked_A_inverse(), so bits
-    must not change during the pipeline delay (3+ cycles).
-
-    Protocol:
-    1. Monitor sbox_ready pulse (HIGH at posedge when fsm_state = TOWER_FIELD)
-    2. On sbox_ready rising edge: latch fresh random bits, assert trng_key_valid
-    3. Hold rand_num stable until sbox_ready falls (sbox transitioned past TOWER_FIELD)
-    4. De-assert trng_key_valid on sbox_ready falling edge
-    """
-    await RisingEdge(dut.clk)
-    prev_ready = 0
-    current_rand = 0
-
-    while True:
-        await RisingEdge(dut.clk)
-        cur_ready = int(dut.sbox_ready.value)
-
-        if cur_ready and not prev_ready:
-            current_rand = random.randint(0, (1 << 112) - 1)
-            dut.rand_num.value = current_rand
-            dut.trng_key_valid.value = 1
-        elif not cur_ready and prev_ready:
-            dut.trng_key_valid.value = 0
-            dut.rand_num.value = 0
-        else:
-            dut.rand_num.value = current_rand
-
-        prev_ready = cur_ready
-
 async def wait_sbox_done(dut, timeout=SBOX_TIMEOUT):
     """Wait for sbox_done to pulse high. Returns cycle count when found."""
     for i in range(timeout):
         await RisingEdge(dut.clk)
-        if int(dut.sbox_done.value) == 1:
+        if int(dut.sbox_done_pulse.value) == 1:
             return i + 1
     raise AssertionError(
         f"TIMEOUT ({timeout} cycles): sbox_done never asserted. "
@@ -330,7 +343,7 @@ async def signal_monitor(dut, label=""):
             "round_num"  : int(dut.round_num.value),
             "key_size"   : int(dut.key_size.value),
             "sbox_enb_n" : int(dut.sbox_enb_n.value),
-            "sbox_done"  : int(dut.sbox_done.value),
+            "sbox_done_pulse" : int(dut.sbox_done_pulse.value),
             "rst_trng"   : int(dut.rst_trng.value),
         }
 
@@ -358,16 +371,16 @@ async def tc1_reset(dut):
     dut._log.info("TC1: Reset behavior")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
 
     dut.rst_n.value          = 0
     dut.round_num.value      = 0xF
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = 0xDEADBEEFCAFEBABE1234567890ABCDEF
     dut.master_key.value     = 0xDEADBEEFCAFEBABE1234567890ABCDEF
-    dut.trng_dead_flag.value = 0
-
+    dut.raw_rand_bit.value   = 0
+    dut.ark_enb_n.value      = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
 
     ark_out  = int(dut.addRoundKeyOut.value)
@@ -390,8 +403,8 @@ async def tc2_aes128_round0(dut):
     dut._log.info("TC2: AES-128 round 0")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC2"))
 
@@ -412,13 +425,11 @@ async def tc2_aes128_round0(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
-
     # Sbox must be disabled for round 0 (combinational check)
     await RisingEdge(dut.clk)
     enb = int(dut.sbox_enb_n.value)
-    assert enb == 1, f"sbox_enb_n should be 1 for round 0, got {enb}"
-    dut._log.info(" sbox_enb_n = 1 (Sbox disabled for round 0)")
+    assert enb == SBOX_DISABLED, f"sbox_enb_n should be 2'b11 for round 0, got {enb:#04b}"
+    dut._log.info(" sbox_enb_n = 2'b11 (Sbox disabled for round 0)")
 
     # One more clock for addRoundKeyOut to register
     await RisingEdge(dut.clk)
@@ -458,8 +469,8 @@ async def tc3_aes128_key_expansion(dut):
     dut._log.info("TC3: AES-128 key expansion diagnostics (10 rounds)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC3"))
 
@@ -478,15 +489,14 @@ async def tc3_aes128_key_expansion(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
-    prev_ek_r0 = int(dut.prev_expKey.value)
+    prev_ek_r0 = int(dut.AddRoundKey.prev_expKey.value)
     dut._log.info("Master key loading check (prev_expKey vs NIST w[0..3]):")
     all_match = True
     for wi in range(Nk):
         rtl_word  = get_expkey_word(prev_ek_r0, wi)
-        nist_word = ref.get_round_key_words(0)[wi]
+        nist_word = ref.w[wi]
         match_str = "PASS" if rtl_word == nist_word else "FAIL"
         if rtl_word != nist_word:
             all_match = False
@@ -508,7 +518,7 @@ async def tc3_aes128_key_expansion(dut):
         await RisingEdge(dut.clk)
 
         # Compare prev_expKey (now updated) with reference round key words
-        prev_ek = int(dut.prev_expKey.value)
+        prev_ek = int(dut.AddRoundKey.prev_expKey.value)
         ark_out = int(dut.addRoundKeyOut.value)
         nist_rk = ref.get_round_key_words(rnd)
 
@@ -546,8 +556,8 @@ async def tc4_aes192_round0(dut):
     dut._log.info("TC4: AES-192 round 0")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     key_bytes = bytes.fromhex("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b")
@@ -560,10 +570,9 @@ async def tc4_aes192_round0(dut):
     dut.key_size.value       = KEY_SIZE_192
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
-
-    assert int(dut.sbox_enb_n.value) == 1, "sbox_enb_n should be 1 for round 0"
     await ClockCycles(dut.clk, 2)
+    enb = int(dut.sbox_enb_n.value)
+    assert enb == SBOX_DISABLED, f"sbox_enb_n should be 2'b11 for round 0, got {enb:#04b}"
 
     # Round 0 for AES-192 uses w[0..3] (first 4 of 6 master key words)
     expected = ref.expected_ark_rtl_int(state_int, 0)
@@ -590,8 +599,8 @@ async def tc5_aes192_key_expansion(dut):
     dut._log.info("TC5: AES-192 key expansion (12 rounds)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC5"))
 
@@ -609,7 +618,6 @@ async def tc5_aes192_key_expansion(dut):
     dut.key_size.value       = KEY_SIZE_192
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
     dut._log.info("Round 0 done")
 
@@ -626,12 +634,12 @@ async def tc5_aes192_key_expansion(dut):
         is_bypass = (rnd % 3 == 2)
 
         if is_bypass:
-            assert enb == 1, f"Round {rnd}: expected sbox_enb_n=1 (bypass), got {enb}"
-            dut._log.info(f"  Bypass round — sbox_enb_n=1")
+            assert enb == SBOX_DISABLED, f"Round {rnd}: expected sbox_enb_n=2'b11 (bypass), got {enb:#04b}"
+            dut._log.info(f"  Bypass round — sbox_enb_n=2'b11")
             # One clock sufficient: addRoundKeyOut updates at next rising edge
             await RisingEdge(dut.clk)
         else:
-            assert enb == 0, f"Round {rnd}: expected sbox_enb_n=0 (compute), got {enb}"
+            assert enb == SBOX_WORD_MODE, f"Round {rnd}: expected sbox_enb_n=2'b10 (compute), got {enb:#04b}"
             cyc = await wait_sbox_done(dut)
             dut._log.info(f"  Compute round — sbox_done after {cyc} cycles")
             await RisingEdge(dut.clk)
@@ -666,8 +674,8 @@ async def tc6_aes256_round0(dut):
     dut._log.info("TC6: AES-256 round 0")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     key_bytes = bytes.fromhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dfe4")
@@ -680,10 +688,9 @@ async def tc6_aes256_round0(dut):
     dut.key_size.value       = KEY_SIZE_256
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
-
-    assert int(dut.sbox_enb_n.value) == 1, "sbox_enb_n should be 1 for round 0"
     await ClockCycles(dut.clk, 2)
+    enb = int(dut.sbox_enb_n.value)
+    assert enb == SBOX_DISABLED, f"sbox_enb_n should be 2'b11 for round 0, got {enb:#04b}"
 
     expected = ref.expected_ark_rtl_int(state_int, 0)
     actual   = int(dut.addRoundKeyOut.value)
@@ -702,13 +709,15 @@ async def tc6_aes256_round0(dut):
 async def tc7_aes256_key_expansion(dut):
     """TC7: AES-256 key expansion — 14 rounds vs NIST A.3.
     Even rounds: SubWord(RotWord) + Rcon for first 4 words.
-    Odd rounds:  SubWord only for last 4 words. Sbox always active (no bypass)."""
+    Odd rounds:  SubWord only for last 4 words, EXCEPT round 1 which is a
+    bypass: Nk=8 means the master key already covers w[0..7], so round 1
+    (w[4..7]) needs no computation and the RTL disables sbox (sbox_enb_n=2'b11)."""
     dut._log.info("=" * 60)
     dut._log.info("TC7: AES-256 key expansion (14 rounds)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC7"))
 
@@ -725,19 +734,31 @@ async def tc7_aes256_key_expansion(dut):
     dut.key_size.value       = KEY_SIZE_256
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     mismatches = []
 
     for rnd in range(1, Nr + 1):
         parity = "even" if rnd % 2 == 0 else "odd"
-        dut._log.info(f"--- Round {rnd} ({parity}) ---")
+        is_bypass = (rnd == 1)  # w[4..7] = master key upper half, no SubWord/RCON needed
+        dut._log.info(f"--- Round {rnd} ({parity}){' [BYPASS]' if is_bypass else ''} ---")
         dut.round_num.value = rnd
 
-        cyc = await wait_sbox_done(dut)
-        dut._log.info(f"  sbox_done after {cyc} cycles")
-        await RisingEdge(dut.clk)
+        if is_bypass:
+            # No sbox involved: needs 2 edges to settle (round_num sampled,
+            # then addRoundKeyOut readable) before comparing.
+            await RisingEdge(dut.clk)
+            await RisingEdge(dut.clk)
+            dut._log.info("  Bypass round: sbox disabled (w[4..7] = master key upper half)")
+        else:
+            # No leading edge before wait_sbox_done (matches TC3's AES-128
+            # pattern): an extra leading edge here would let sbox_enb_n stay
+            # asserted across the round boundary and spuriously re-trigger
+            # the SBox's free-running INIT->TOWER_FIELD transition on stale
+            # operands from the previous round.
+            cyc = await wait_sbox_done(dut)
+            dut._log.info(f"  sbox_done after {cyc} cycles")
+            await RisingEdge(dut.clk)
 
         # Compare addRoundKeyOut against NIST reference
         expected = ref.expected_ark_rtl_int(state_int, rnd)
@@ -765,8 +786,8 @@ async def tc8_sbox_gating(dut):
     dut._log.info("TC8: Register gating by sbox_done")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     key_bytes = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
@@ -779,11 +800,10 @@ async def tc8_sbox_gating(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     out_r0 = int(dut.addRoundKeyOut.value)
-    ek_r0  = int(dut.prev_expKey.value)
+    ek_r0  = int(dut.AddRoundKey.prev_expKey.value)
     dut._log.info(f"  Round 0 snapshot: addRoundKeyOut=0x{out_r0:032x}")
 
     # Transition to round 1 — sbox enables, but registers must hold until sbox_done
@@ -791,10 +811,10 @@ async def tc8_sbox_gating(dut):
     stable_cycles = 0
     for _ in range(SBOX_LATENCY - 1):
         await RisingEdge(dut.clk)
-        if int(dut.sbox_done.value) == 1:
+        if int(dut.sbox_done_pulse.value) == 1:
             break
         cur_out = int(dut.addRoundKeyOut.value)
-        cur_ek  = int(dut.prev_expKey.value)
+        cur_ek  = int(dut.AddRoundKey.prev_expKey.value)
         if cur_out == out_r0 and cur_ek == ek_r0:
             stable_cycles += 1
         else:
@@ -815,7 +835,7 @@ async def tc8_sbox_gating(dut):
     dut._log.info(f" addRoundKeyOut updated after sbox_done: 0x{out_r1:032x}")
 
     # Verify sbox_done was a single-cycle pulse
-    sd_now = int(dut.sbox_done.value)
+    sd_now = int(dut.sbox_done_pulse.value)
     assert sd_now == 0, f"sbox_done should be 0 one cycle after pulse, got {sd_now}"
     dut._log.info(" sbox_done is a single-cycle pulse")
 
@@ -825,13 +845,20 @@ async def tc8_sbox_gating(dut):
 # TC9: TRNG dead flag → rst_trng
 @cocotb.test()
 async def tc9_trng_dead_flag(dut):
-    """TC9: Assert trng_dead_flag mid-sbox computation; verify rst_trng asserts."""
+    """TC9: Stuck noise bit → TRNG health tests fail → trng_dead_flag → sbox asserts rst_trng.
+
+    trng_dead_flag is driven by the real TRNG instance now, so instead of forcing
+    it we starve the noise source: raw_rand_bit is held constant, the Repetition
+    Count Test fails repeatedly (RCT_THRESHOLD=8, CONSECUTIVE_ERRORS=3), the
+    control unit reaches DEAD and raises dead_flag. The sbox (enabled via
+    round_num=1) must then respond with rst_trng.
+    """
     dut._log.info("=" * 60)
-    dut._log.info("TC9: TRNG dead flag → rst_trng")
+    dut._log.info("TC9: TRNG dead flag (stuck noise source) → rst_trng")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    # NOTE: no noise_driver here -- raw_rand_bit stays 0 (stuck-at) on purpose
     await reset_dut(dut)
 
     key_bytes = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
@@ -841,31 +868,33 @@ async def tc9_trng_dead_flag(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = 0
     dut.master_key.value     = ref.master_key_rtl_int()
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
-    # Start round 1 (sbox enabled), inject dead flag after 2 cycles
+    # Enable the sbox (round 1) so it can observe trng_dead_flag
     dut.round_num.value = 1
-    await ClockCycles(dut.clk, 2)
 
-    dut.trng_dead_flag.value = 1
-    dut._log.info("trng_dead_flag asserted")
+    # Wait for the health tests to declare total failure
+    dead_seen = False
+    for i in range(500):
+        await RisingEdge(dut.clk)
+        if int(dut.trng_dead_flag.value) == 1:
+            dut._log.info(f" trng_dead_flag asserted after {i+1} cycles (stuck noise)")
+            dead_seen = True
+            break
+    assert dead_seen, "TIMEOUT: trng_dead_flag never asserted with stuck-at noise source"
 
+    # Sbox must react by resetting the TRNG
     rst_asserted = False
-    for i in range(10):
+    for i in range(20):
         await RisingEdge(dut.clk)
         if int(dut.rst_trng.value) == 1:
             dut._log.info(f" rst_trng asserted after {i+1} cycles")
             rst_asserted = True
             break
-
     assert rst_asserted, "TIMEOUT: rst_trng never asserted after trng_dead_flag"
 
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
-
-    rst_now = int(dut.rst_trng.value)
-    dut._log.info(f"  rst_trng after flag clear: {rst_now}")
+    dut._log.info(f"  rst_trng after TRNG reset cycle: {int(dut.rst_trng.value)}")
 
     dut._log.info(" TC9 PASSED")
 
@@ -879,8 +908,8 @@ async def tc10_rcon_check(dut):
     dut._log.info("TC10: RCON table — RCON[4] verification")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     # All-zero key: w[4i] = SubWord(RotWord(0)) XOR RCON[i] = 0x63636363 XOR RCON[i]
@@ -891,7 +920,6 @@ async def tc10_rcon_check(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = 0
     dut.master_key.value     = 0
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     # Run through first 4 rounds to reach the RCON[4]-affected word w[16]
@@ -900,7 +928,7 @@ async def tc10_rcon_check(dut):
         await wait_sbox_done(dut)
         await RisingEdge(dut.clk)
 
-    prev_ek  = int(dut.prev_expKey.value)
+    prev_ek  = int(dut.AddRoundKey.prev_expKey.value)
     rtl_w16  = get_expkey_word(prev_ek, 0)
     nist_w16 = ref.get_round_key_words(4)[0]  # w[16]
 
@@ -926,8 +954,8 @@ async def tc11_all_zero_key(dut):
     dut._log.info("TC11: All-zero key edge case")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     pt_bytes  = [0x32,0x43,0xf6,0xa8,0x88,0x5a,0x30,0x8d,
@@ -940,7 +968,6 @@ async def tc11_all_zero_key(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = 0
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     # Round 0: XOR with all-zero key = state itself
@@ -975,8 +1002,8 @@ async def tc12_all_ones_key(dut):
     dut._log.info("TC12: All-ones key edge case")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     key_ff = bytes([0xFF]*16)
@@ -988,7 +1015,6 @@ async def tc12_all_ones_key(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = ref.master_key_rtl_int()
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     # Round 0: state=0 XOR 0xff...ff → output should be non-zero
@@ -1010,13 +1036,13 @@ async def tc12_all_ones_key(dut):
 # TC13: Sbox pipeline latency
 @cocotb.test()
 async def tc13_sbox_latency(dut):
-    """TC13: Sbox pipeline must take exactly 6 clock cycles (TOWER_FIELD→SUB_BYTES)."""
+    """TC13: Sbox pipeline must take exactly SBOX_LATENCY clock cycles (INIT→SUB_BYTES)."""
     dut._log.info("=" * 60)
-    dut._log.info("TC13: Sbox latency = exactly 6 cycles")
+    dut._log.info("TC13: Sbox latency check")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
 
     key_bytes = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
@@ -1026,7 +1052,6 @@ async def tc13_sbox_latency(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = 0
     dut.master_key.value     = ref.master_key_rtl_int()
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
     # Enable sbox (round_num = 1). Measure cycles until sbox_done.
@@ -1037,7 +1062,7 @@ async def tc13_sbox_latency(dut):
     for _ in range(SBOX_TIMEOUT):
         await RisingEdge(dut.clk)
         measured += 1
-        if int(dut.sbox_done.value) == 1:
+        if int(dut.sbox_done_pulse.value) == 1:
             break
     else:
         assert False, f"sbox_done never asserted within {SBOX_TIMEOUT} cycles"
@@ -1063,8 +1088,8 @@ async def tc14_per_round_key_comparison_aes128(dut):
     dut._log.info("TC14: AES-128 per-round key comparison (same stimulus)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC14"))
 
@@ -1084,14 +1109,13 @@ async def tc14_per_round_key_comparison_aes128(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
-    prev_ek_r0 = int(dut.prev_expKey.value)
+    prev_ek_r0 = int(dut.AddRoundKey.prev_expKey.value)
     dut._log.info("Round 0: Verifying master key in prev_expKey")
     for wi in range(Nk):
         rtl_word  = get_expkey_word(prev_ek_r0, wi)
-        nist_word = ref.get_round_key_words(0)[wi]
+        nist_word = ref.w[wi]
         match = "✓" if rtl_word == nist_word else "✗"
         dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
         assert rtl_word == nist_word, f"Round 0 w[{wi}] mismatch"
@@ -1108,7 +1132,7 @@ async def tc14_per_round_key_comparison_aes128(dut):
         cyc = await wait_sbox_done(dut)
         await RisingEdge(dut.clk)
 
-        prev_ek = int(dut.prev_expKey.value)
+        prev_ek = int(dut.AddRoundKey.prev_expKey.value)
         nist_rk = ref.get_round_key_words(rnd)
 
         dut._log.info(f"  Sbox completed in {cyc} cycles")
@@ -1145,8 +1169,8 @@ async def tc15_per_round_key_comparison_aes192(dut):
     dut._log.info("TC15: AES-192 per-round key comparison (same stimulus)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC15"))
 
@@ -1166,14 +1190,13 @@ async def tc15_per_round_key_comparison_aes192(dut):
     dut.key_size.value       = KEY_SIZE_192
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
-    prev_ek_r0 = int(dut.prev_expKey.value)
+    prev_ek_r0 = int(dut.AddRoundKey.prev_expKey.value)
     dut._log.info("Round 0: Verifying 6 master key words")
     for wi in range(Nk):
         rtl_word  = get_expkey_word(prev_ek_r0, wi)
-        nist_word = ref.get_round_key_words(0)[wi]
+        nist_word = ref.w[wi]
         match = "✓" if rtl_word == nist_word else "✗"
         dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
         assert rtl_word == nist_word, f"Round 0 w[{wi}] mismatch"
@@ -1196,20 +1219,30 @@ async def tc15_per_round_key_comparison_aes192(dut):
             dut._log.info(f"  Compute round: sbox_done after {cyc} cycles")
             await RisingEdge(dut.clk)
 
-        prev_ek = int(dut.prev_expKey.value)
+        prev_ek = int(dut.AddRoundKey.prev_expKey.value)
         ark_out = int(dut.addRoundKeyOut.value)
-        nist_rk = ref.get_round_key_words(rnd)
         expected_ark = ref.expected_ark_rtl_int(state_int, rnd)
 
-        dut._log.info(f"  Comparing {Nk} key words:")
-        for wi in range(Nk):
+        # prev_expKey holds a 6-word key-expansion BATCH w[6b..6b+5], not w[4r..].
+        # b = number of expansion batches completed by round rnd (bypass rounds
+        # 2,5,8,11 don't expand): b = rnd - (rnd+1)//3.
+        # AES-192 needs only Nb*(Nr+1)=52 words (w[0..51]); the 8th batch (round 12)
+        # is a partial batch of just 4 words (w[48..51]) since 52 isn't a multiple
+        # of 6 — w[52]/w[53] are never generated or consumed, so only compare the
+        # words that actually exist in the NIST schedule.
+        batch = rnd - (rnd + 1) // 3
+        batch_words = ref.w[6*batch : 6*batch + 6]
+        n_words = min(Nk, len(batch_words))
+
+        dut._log.info(f"  Comparing {n_words} key words (batch {batch} = w[{6*batch}..{6*batch+n_words-1}]):")
+        for wi in range(n_words):
             rtl_word  = get_expkey_word(prev_ek, wi)
-            nist_word = nist_rk[wi]
+            nist_word = batch_words[wi]
             match = "✓" if rtl_word == nist_word else "✗"
-            dut._log.info(f"    w[{Nk*rnd+wi:2d}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+            dut._log.info(f"    w[{6*batch+wi:2d}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
 
             if rtl_word != nist_word:
-                mismatches.append(f"Round {rnd} w[{Nk*rnd+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+                mismatches.append(f"Round {rnd} w[{6*batch+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
 
         ark_match = "✓" if ark_out == expected_ark else "✗"
         dut._log.info(f"  addRoundKeyOut: RTL=0x{ark_out:032x}  NIST=0x{expected_ark:032x}  {ark_match}")
@@ -1231,15 +1264,17 @@ async def tc15_per_round_key_comparison_aes192(dut):
 async def tc16_per_round_key_comparison_aes256(dut):
     """TC16: AES-256 per-round key expansion comparison (same stimulus).
 
-    Validates AES-256 key expansion against NIST A.3. AES-256 has no bypass rounds;
-    sbox is active on all cipher rounds. Even and odd rounds use different key patterns.
+    Validates AES-256 key expansion against NIST A.3. Sbox is active on all
+    rounds EXCEPT round 1 (bypass: Nk=8 means the master key already covers
+    w[0..7], so w[4..7] needs no computation). Even and odd rounds otherwise
+    use different key patterns.
     """
     dut._log.info("=" * 60)
     dut._log.info("TC16: AES-256 per-round key comparison (same stimulus)")
     dut._log.info("=" * 60)
 
-    start_clock(dut)
-    cocotb.start_soon(trng_model(dut))
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
     await reset_dut(dut)
     cocotb.start_soon(signal_monitor(dut, label="TC16"))
 
@@ -1251,7 +1286,7 @@ async def tc16_per_round_key_comparison_aes256(dut):
     master_key_int = ref.master_key_rtl_int()
 
     dut._log.info(f"Reference model: AES-{len(key_bytes)*8} (Nk={Nk}, Nr={Nr})")
-    dut._log.info("Note: AES-256 has no bypass; sbox active all rounds (even and odd)")
+    dut._log.info("Note: round 1 is a bypass round (w[4..7]=master key upper half); sbox active all other rounds")
 
     # Round 0
     dut._log.info("\n=== Round 0: Master Key Loading ===")
@@ -1259,52 +1294,61 @@ async def tc16_per_round_key_comparison_aes256(dut):
     dut.key_size.value       = KEY_SIZE_256
     dut.state.value          = state_int
     dut.master_key.value     = master_key_int
-    dut.trng_dead_flag.value = 0
     await ClockCycles(dut.clk, 2)
 
-    prev_ek_r0 = int(dut.prev_expKey.value)
+    prev_ek_r0 = int(dut.AddRoundKey.prev_expKey.value)
     dut._log.info("Round 0: Verifying 8 master key words")
     for wi in range(Nk):
         rtl_word  = get_expkey_word(prev_ek_r0, wi)
-        nist_word = ref.get_round_key_words(0)[wi]
+        nist_word = ref.w[wi]
         match = "✓" if rtl_word == nist_word else "✗"
         dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
         assert rtl_word == nist_word, f"Round 0 w[{wi}] mismatch"
 
-    # Rounds 1-14: key expansion (no bypass)
-    dut._log.info("\n=== Rounds 1-14: Key Expansion (Sbox Always Active) ===")
+    # Rounds 1-14: key expansion (round 1 bypass, sbox active otherwise)
+    dut._log.info("\n=== Rounds 1-14: Key Expansion ===")
     mismatches = []
 
     for rnd in range(1, Nr + 1):
         parity = "even" if rnd % 2 == 0 else "odd"
-        dut._log.info(f"\n--- Round {rnd} ({parity}) ---")
+        is_bypass = (rnd == 1)  # w[4..7] = master key upper half, no SubWord/RCON needed
+        dut._log.info(f"\n--- Round {rnd} ({parity}){' [BYPASS]' if is_bypass else ''} ---")
         dut.round_num.value = rnd
 
-        cyc = await wait_sbox_done(dut)
-        dut._log.info(f"  Sbox completed in {cyc} cycles")
-        await RisingEdge(dut.clk)
+        if is_bypass:
+            # No sbox involved: needs 2 edges to settle (round_num sampled,
+            # then addRoundKeyOut readable) before comparing.
+            await RisingEdge(dut.clk)
+            await RisingEdge(dut.clk)
+            dut._log.info("  Bypass round: sbox disabled (w[4..7] = master key upper half)")
+        else:
+            cyc = await wait_sbox_done(dut)
+            dut._log.info(f"  Sbox completed in {cyc} cycles")
+            await RisingEdge(dut.clk)
 
-        prev_ek = int(dut.prev_expKey.value)
+        prev_ek = int(dut.AddRoundKey.prev_expKey.value)
         ark_out = int(dut.addRoundKeyOut.value)
-        nist_rk = ref.get_round_key_words(rnd)
         expected_ark = ref.expected_ark_rtl_int(state_int, rnd)
 
-        if rnd % 2 == 0:
-            dut._log.info(f"  Even round: comparing first 4 key words")
-            num_words = 4
-        else:
-            dut._log.info(f"  Odd round: comparing last 4 key words")
-            num_words = 4
+        # prev_expKey layout for AES-256: even rounds refresh words [0..3],
+        # odd rounds refresh words [4..7]. After round rnd the halves should hold
+        #   [0..3] = w[4*re .. 4*re+3],  re = last even round <= rnd (incl. 0)
+        #   [4..7] = w[4*ro .. 4*ro+3],  ro = last odd  round <= rnd (w[4..7] from
+        #            the master key doubles as the "round 1" half, so ro >= 1)
+        re_ = rnd if rnd % 2 == 0 else rnd - 1
+        ro_ = rnd if rnd % 2 == 1 else max(rnd - 1, 1)
+        exp_words   = ref.w[4*re_ : 4*re_+4] + ref.w[4*ro_ : 4*ro_+4]
+        word_labels = list(range(4*re_, 4*re_+4)) + list(range(4*ro_, 4*ro_+4))
 
-        dut._log.info(f"  Comparing {num_words} key words:")
+        dut._log.info(f"  Comparing {Nk} key words ([0..3]=w[{4*re_}..{4*re_+3}], [4..7]=w[{4*ro_}..{4*ro_+3}]):")
         for wi in range(Nk):
             rtl_word  = get_expkey_word(prev_ek, wi)
-            nist_word = nist_rk[wi]
+            nist_word = exp_words[wi]
             match = "✓" if rtl_word == nist_word else "✗"
-            dut._log.info(f"    w[{Nk*rnd+wi:2d}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+            dut._log.info(f"    w[{word_labels[wi]:2d}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
 
             if rtl_word != nist_word:
-                mismatches.append(f"Round {rnd} w[{Nk*rnd+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+                mismatches.append(f"Round {rnd} w[{word_labels[wi]}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
 
         ark_match = "✓" if ark_out == expected_ark else "✗"
         dut._log.info(f"  addRoundKeyOut: RTL=0x{ark_out:032x}  NIST=0x{expected_ark:032x}  {ark_match}")

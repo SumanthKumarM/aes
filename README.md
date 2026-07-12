@@ -1,44 +1,46 @@
-# Composite Masked AES S-Box
+# Composite Masked AES
 
-A hardware implementation of a **first-order masked AES S-Box** using **Canright's composite field inversion**, with an integrated **True Random Number Generator (TRNG)** for side-channel resistance.
+A hardware implementation of the **AES block cipher** built around a **first-order masked S-Box** using **Canright's composite field inversion**, with an integrated **True Random Number Generator (TRNG)** supplying the fresh randomness needed for side-channel resistance.
 
 ---
 
-## Project Implementations
+## Project Overview
 
-### S-Box
+This project implements AES-128/192/256 encryption as a pipeline of RTL blocks, each derived directly from FIPS 197 with a masked, side-channel-resistant datapath where it matters most — the S-Box.
 
-The AES SubBytes operation requires computing the multiplicative inverse `b⁻¹` in GF(2⁸). Rather than a lookup table, this design computes it structurally using **composite field arithmetic** over GF((2⁴)²), following Canright's basis decomposition.
+### Components
 
-To guard against power analysis attacks, the S-Box uses **first-order Boolean masking** — every intermediate value is split into two shares before any nonlinear (multiplication) operation occurs. Fresh randomness R is consumed at each GF(2⁴) multiplication; linear steps (squarings, basis transforms, affine transform) are free and handled per-share with no additional randomness.
-
-### TRNG
-
-A hardware TRNG generates the fresh mask values the S-Box requires. It draws physical entropy from a **32-oscillator ring oscillator array** (13 inverters each), mixes outputs via an XOR tree, and samples with a D flip-flop. The raw bitstream passes through **RCT and APT health tests**, is collected into 256-bit entropy blocks, and conditioned through **Keccak-f[1600]** (24 rounds) before being formatted as 4-bit mask values R₁ … R₇.
+| Block | Description |
+|---|---|
+| **TRNG** | Generates the fresh randomness consumed by the masked S-Box. Draws physical entropy from a 32-oscillator ring oscillator array, passes it through RCT/APT health tests, and conditions it via Keccak-f[1600] into mask values. |
+| **S-Box** | Computes the AES `SubBytes` multiplicative inverse structurally over the composite field GF((2⁴)²), using Canright's basis decomposition. Every nonlinear step is first-order Boolean masked using randomness from the TRNG. |
+| **AddRoundKey / KeyExpansion** | Implements FIPS 197 `KeyExpansion()` and `AddRoundKey()` for all three standard key sizes (AES-128/192/256) using a rolling register bank, reusing the masked S-Box for the `SubWord()` step. |
+| **ShiftRows / MixColumns** | Combinational datapath blocks implementing the FIPS 197 `ShiftRows()` and `MixColumns()` transforms. |
+| **Cipher** | Top-level datapath that sequences the blocks above into the full FIPS 197 `Cipher()` round structure. |
 
 ---
 
 ## Documentation
 
-Full implementation details are in the AsciiDoc files:
+This README is intentionally brief. For the full technical documentation — design derivations, masking strategy, gadget-level detail, FSMs, and verification results for every block — go to the [`docs/`](docs/) directory.
 
-| Document | Contents |
+---
+
+## Research Background
+
+This project's design and verification approach is grounded in the following references:
+
+- **FIPS 197** — *Advanced Encryption Standard (AES)*, NIST, 2001 (updated 2023). https://doi.org/10.6028/NIST.FIPS.197-upd1
+- **Canright, D.** — *A Very Compact Rijndael S-box*, Naval Postgraduate School, 2005. (Composite field GF((2⁴)²) inversion structure used by the S-Box.). https://www.mdpi.com/1424-8220/25/6/1678
+- **Piscopo, V.; Dolmeta, A.; Mirigaldi, M.; Martina, M.; Masera, G.** — *A High-Entropy True Random Number Generator with Keccak Conditioning for FPGA*, Sensors, 25(6), 1678, 2025. https://doi.org/10.3390/s25061678 (Ring-oscillator TRNG architecture and Keccak conditioning approach adapted for the TRNG block.)
+
+
+---
+
+## Tools & Simulation Environment
+
+| Purpose | Tool |
 |---|---|
-| [`sbox_implementation.adoc`](sbox_implementation.adoc) | Field definitions, basis matrices, composite inversion, masking strategy, all masked gadgets, squarer derivation, affine transform |
-| [`trng_implementation.adoc`](trng_implementation.adoc) | Ring oscillator design, XOR mixing, health tests (RCT/APT), entropy collection, Keccak conditioning, output formatting |
-| [`master.adoc`](master.adoc) | Master document that includes both of the above |
-
----
-
-## Verification
-
-- **S-Box:** All 256 inputs verified against the FIPS-197 AES S-Box table. Test vector: `0x53 → 0xED`.
-- **TRNG:** Cocotb-based simulation covering entropy injection, bias detection, stuck-bit faults, health tests, and Keccak permutation correctness.
-
----
-
-## References
-
-- **FIPS 197** — AES Standard, NIST, 2001 (updated 2023). https://doi.org/10.6028/NIST.FIPS.197-upd1
-- **Canright, D.** — A Very Compact Rijndael S-box. Naval Postgraduate School, 2005.
-- **Ring Oscillator TRNG with Keccak Conditioning** — Sensors (MDPI), 2025. https://www.mdpi.com/1424-8220/25/5/1678
+| **Compiler / Simulator** | [Verilator](https://www.veripool.org/verilator/) — compiles the SystemVerilog RTL into a cycle-accurate C++ simulation model. |
+| **Verification Framework** | [cocotb](https://www.cocotb.org/) (Python) — drives the Verilator model and implements all testbenches, checkers, and coverage. |
+| **Linting & Synthesis** | [Xilinx Vivado](https://www.xilinx.com/products/design-tools/vivado.html) — RTL linting and FPGA synthesis. |

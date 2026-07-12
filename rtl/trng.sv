@@ -1,10 +1,12 @@
 /**
- * This TRNG block is designed to output 1680 random bits so that CIPHER block can consume it
- * CIPHER block internally has 2 Sbox's, one Sbox converts whole state matrix and produces subBytes for each element in state matrix. This Sbox consumes 448 random bits (28 random bits per byte)
+ * This TRNG block is designed to output 1680 random bits so that CIPHER block can consume it.
+ * CIPHER block internally has 2 Sbox's, one Sbox converts whole state matrix and produces subBytes for each element in state matrix. 
+   This Sbox consumes 448 random bits (28 random bits per byte).
  * Another Sbox is used in AddRoundKey for keyExpansion logic where Sbox converts a word (32-bits) and produces subBytes for them. This Sbox consumes 112 random bits.
- * Each round in CIPHER invokes Sbox twice when KEY size is either 128 or 256 bits but CIPHER invokes Sbox only once per round only when (i%6=0) is met. So the CIPHER consumes 560 random bits per round at max
+ * Each round in CIPHER invokes Sbox twice when KEY size is either 128 or 256 bits but CIPHER invokes Sbox only once per round only when (i%6=0) is met. 
+   So the CIPHER consumes 560 random bits per round at max.
  * This TRNG can output 1680 random bits so it can accommodate 3 CIPHER rounds. While CIPHER works for 3 rounds, TRNG meanwhile computes next batch of 1680 random bits. 
- * So using this mechanism both TRNG and CIPHER work in a pipelined fashion to ensure maximum through-put is acheieved using this design implementation 
+ * So using this mechanism both TRNG and CIPHER work in a pipelined fashion to ensure maximum through-put is acheieved using this design implementation .
 **/
 
 import trng_param_pkg::*;
@@ -13,7 +15,7 @@ import type_defs_pkg::*;
 module trng(
     output logic [1679:0] rand_word,  // 1680-bit random packet to CIPHER block
     output logic trng_key_valid,  // tells S-box that random words are ready
-    output logic dead_flag,  // tells AES_GCM that TRNG has failed
+    output logic dead_flag,  // tells SBox that TRNG has failed
     input logic sbox_ready,  // SBox acknowledges receiption of random bits
     input logic raw_rand_bit,  // noise source bit which is driven by noise source model
     input logic sampling_clk,  // high frequency independent clock for noise source
@@ -21,20 +23,16 @@ module trng(
 
     logic rand_bit_sync1, rand_bit;  // CDC synchronized rand_bit (clk domain)
 
-    // CDC synchronized control signals (sampling_clk domain)
-    logic noise_enb_sync1, noise_enb_n;
-    logic noise_rst_sync1, noise_rst_n;
-
     // entropy collector - keccak handshake
     logic [63:0] entropy_word;
     logic valid, ready;
 
     logic key_ready;  // keccak to control unit
-    logic health_error, total_failure;  // health tests to control unit
+    logic health_error;  // health tests to control unit
 
     // control unit outputs
     logic noise_src_enb_n;
-    logic enb_health_tests;
+    logic enb_health_tests_n;
     logic get_raw_entropy;
     logic local_rst_n;
 
@@ -53,41 +51,17 @@ module trng(
         end
     end
 
-    // noise source enable synchronizer, clk domain to sampling_clk domain
-    always_ff @(posedge sampling_clk) begin
-        if(!local_rst_n) begin
-            noise_enb_sync1 <= 1;   // active low — disabled by default
-            noise_enb_n <= 1;
-        end
-        else begin
-            noise_enb_sync1 <= noise_src_enb_n;
-            noise_enb_n <= noise_enb_sync1;
-        end
-    end
-
-    // noise source reset synchronizer, clk domain to sampling_clk domain
-    always_ff @(posedge sampling_clk) begin
-        if(!local_rst_n) begin
-            noise_rst_sync1 <= 0;
-            noise_rst_n <= 0;
-        end
-        else begin
-            noise_rst_sync1 <= 1;
-            noise_rst_n <= noise_rst_sync1;
-        end
-    end
-
     // entropy collector (clk domain)    
-    entropy_clctr entropy_col(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
+    entropy_clctr ENTROPY_COLLECTOR(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
 
     // health tests (clk domain)
-    health_tests hlth_tst(health_error, total_failure, rand_bit, enb_health_tests, clk, ext_rst_n);
+    health_tests HEALTH_TESTS(health_error, rand_bit, enb_health_tests_n, clk, ext_rst_n);
 
     // keccak conditioning block (clk domain)
-    keccak_cond keccak(rand_word, ready, trng_key_valid, entropy_word, get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
+    keccak_cond KECCAK_COND(rand_word, ready, trng_key_valid, entropy_word, get_raw_entropy, sbox_ready, valid, clk, local_rst_n);
 
     // control unit (clk domain)
-    control_unit cu (noise_src_enb_n, enb_health_tests, get_raw_entropy, local_rst_n, dead_flag, health_error, total_failure, trng_key_valid, clk, ext_rst_n);
+    control_unit CONTROL_UNIT(noise_src_enb_n, enb_health_tests_n, get_raw_entropy, local_rst_n, dead_flag, health_error, trng_key_valid, clk, ext_rst_n);
 endmodule
 
 // entropy collector
@@ -126,7 +100,7 @@ endmodule
 // Keccak conditioning block
 module keccak_cond (
     output logic [1679:0] rand_word,  // 1680 random bits needed for CIPHER
-    output logic ready,  // indicates entropy collector that this block isi ready to accecpt raw entropy
+    output logic ready,  // indicates entropy collector that this block is ready to accecpt raw entropy
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
     input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
     input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
@@ -304,90 +278,74 @@ endmodule
 
 // NIST standard health tests 
 module health_tests (
-    output logic error, total_failure,
-    input logic rand_bit, enable_health_test,
+    output logic error,
+    input logic rand_bit, enable_health_test_n,
     input logic clk, rst_n);
 
     localparam APT_CNTR_WIDTH = $clog2(APT_BIT_WINDOW);
+    localparam RCT_CNTR_WIDTH = $clog2(RCT_THRESHOLD + 1);
 
-    logic [3:0] rct_counter;
-    logic [1:0] err_cntr;
-    logic rct_prev_bit, prev_err;
+    logic [RCT_CNTR_WIDTH-1:0] rct_counter;
+    logic rct_prev_bit;
     logic [APT_CNTR_WIDTH-1 : 0] apt_window_cntr, apt_counter;
     wire rct_error, apt_error;
 
     // Repetetion Count Test (RCT)
     always_ff @(posedge clk) begin
-        if(!rst_n || !enable_health_test) begin
+        if(!rst_n) begin
             rct_counter <= 0;
             rct_prev_bit <= 0;
         end 
         else begin
-            if(rct_prev_bit  ==  rand_bit) rct_counter <= rct_counter + 1; // counter increases only when consecutive bits appear
-            else rct_counter <= 0;
-            // updating rct_prev_bit so that it can be used in next cycle for comparison
-            rct_prev_bit <= rand_bit;
+            if(!enable_health_test_n) begin
+                if(rct_prev_bit == rand_bit) rct_counter <= rct_counter + 1; // counter increases only when consecutive bits appear
+                else rct_counter <= 0;
+                rct_prev_bit <= rand_bit;  // updating rct_prev_bit so that it can be used in next cycle for comparison
+            end
+            else begin
+                rct_counter <= rct_counter;
+                rct_prev_bit <= rct_prev_bit;
+            end
         end
     end
 
-    // if a bit repeats more than the threshold then it errors out
-    assign rct_error = (rct_counter >= 4'(RCT_THRESHOLD)) ? 1 : 0;
-
     // Adaptive Proportion Test (APT)
     always_ff @(posedge clk) begin
-        if(!rst_n || !enable_health_test) begin
+        if(!rst_n) begin
             apt_window_cntr <= 0;
             apt_counter <= 0;
         end
         else begin
-            if(apt_window_cntr  ==  (APT_CNTR_WIDTH)'(APT_BIT_WINDOW-1)) begin
-                apt_counter <= (rand_bit == 1) ? 1 : 0; // if when 1024th bit is 1 then it is counted or else the registers gets reset
-                apt_window_cntr <= 0; // explicit window counter reset to keep both registers in sync
+            if(!enable_health_test_n) begin
+                if(apt_window_cntr == (APT_CNTR_WIDTH)'(APT_BIT_WINDOW-1)) begin
+                    apt_counter <= (rand_bit) ? 1 : 0; // if when 1024th bit is 1 then it is counted or else the registers gets reset
+                    apt_window_cntr <= 0; // explicit window counter reset to keep both registers in sync
+                end
+                else begin 
+                    apt_counter <= apt_counter + type(apt_counter)'(rand_bit); 
+                    apt_window_cntr <= apt_window_cntr + 1; // this counter keeps track of 1024-bit window
+                end
             end
-            else begin 
-                apt_counter <= apt_counter + type(apt_counter)'(rand_bit); 
-                apt_window_cntr <= apt_window_cntr + 1; // this counter keeps track of 1024-bit window
+            else begin
+                apt_window_cntr <= apt_window_cntr;
+                apt_counter <= apt_counter;
             end
         end
     end
 
+    assign rct_error = (rct_counter >= (RCT_CNTR_WIDTH)'(RCT_THRESHOLD)) ? 1 : 0;  // if a bit repeats more than the threshold then it errors out
     assign apt_error = (apt_counter > (APT_CNTR_WIDTH)'(APT_THRESHOLD)) ? 1 : 0;
-
-    // final error output
-    assign error = rct_error | apt_error;
-
-    // total failure occurs when consecutive error occur
-    always_ff @(posedge clk) begin
-        if(!rst_n) begin
-            err_cntr <= 0;
-            prev_err <= 0;
-            total_failure <= 0;
-        end 
-        else begin
-            if(prev_err == error && error == 1) err_cntr <= err_cntr + 1; // increments when consecutive errors occur
-            else err_cntr <= 0;
-            //updating prev_err so that it can be used in next cycle for comparison
-            prev_err <= error;
-
-            // updating total_failure bit which is a sticky bit
-            total_failure <= total_failure | (err_cntr >= 2'(CONSECUTIVE_ERRORS));
-        end
-    end
+    assign error = rct_error | apt_error;  // final error output
 endmodule
 
 // control unit
-typedef enum logic [2:0] {IDLE, BIST, WAIT_FOR_XFER, 
-    ERROR_RECOVERY, DEAD
-} cu_states;
-
 module control_unit(
     output logic noise_src_enb_n,  // enables noise source (active-low)
-    output logic enb_health_tests,  // enables health tests module
+    output logic enb_health_tests_n,  // enables health tests module
     output logic get_raw_entropy,  // indicates when to use raw entropy instead of DRBG feedback
     output logic local_rst_n,  // local rst_n given by control unit to all other modules
     output logic dead_flag,  // indicates total failure occurred
-    input logic health_error,  // input from health tests when APT or RCT occurs 
-    input logic total_failure,  // input from health tests module when consecutive health errors occur
+    input logic health_error,  // input from health tests when APT or RCT occurs
     input logic Keccak_ready,  // input from Keccak conditioning module indicating that Key is ready
     input logic clk, ext_rst_n);
 
@@ -395,91 +353,61 @@ module control_unit(
 
     cu_states fsm_state;
     logic [DRBG_CNTR_WIDTH-1 : 0] drbg_cntr;  // determines for how many cycles state matrix should get raw entropy
-    logic err_state_delay;
 
     always_ff @(posedge clk) begin
         if(!ext_rst_n) begin
             fsm_state <= IDLE;
             noise_src_enb_n <= 1;
-            enb_health_tests <= 0;
+            enb_health_tests_n <= 1;
             get_raw_entropy <= 0;
             dead_flag <= 0;
             drbg_cntr <= 0;
             local_rst_n <= 0;
-            err_state_delay <= 0;
         end
         else begin
             case(fsm_state)
-                IDLE: begin
-                    // this state provides the TRNG to stabilize and maintain its states before performing actual operations
+                IDLE: begin  // this state provides the TRNG to stabilize and maintain its states before performing actual operations
                     noise_src_enb_n <= 1;  // making oscilattor stable
-                    enb_health_tests <= 0;  // disabling health tests module
+                    enb_health_tests_n <= 1;  // disabling health tests module
                     get_raw_entropy <= 0;  // disables raw entropy as default
-                    dead_flag <= 0;  // indicates that whole TRNG block need reset to boot
+                    dead_flag <= 0;
                     drbg_cntr <= drbg_cntr;
-                    local_rst_n <= 1; 
-                    // unconditionally transitions to BIST state
-                    fsm_state <= BIST; 
+                    local_rst_n <= 0; 
+                    fsm_state <= BIST;  // unconditionally transitions to BIST state 
                 end 
                 BIST: begin
                     local_rst_n <= 1;
+                    dead_flag <= 0;
 
                     // enabling blocks
                     noise_src_enb_n <= 0;
-                    enb_health_tests <= 1;
+                    enb_health_tests_n <= 0;
 
                     // setting get_raw_entropy, for every (DRBG_CYCLES) cycles Keccak block uses
                     // actual raw entropy or else it uses DRBG feedback path
                     get_raw_entropy <= (drbg_cntr == 0) ? 1 : 0;
 
-                    // state transition
-                    case({total_failure, health_error})
-                        2'b00: fsm_state <= (Keccak_ready == 1) ? WAIT_FOR_XFER : BIST;
-                        2'b01: fsm_state <= ERROR_RECOVERY;  // since an error has occurred, goes to error recovery state
-                        2'b10, 2'b11: fsm_state <= DEAD;  // since both cases have total_failure = 1, goes to DEAD state waiting for external reset 
-                        default: fsm_state <= BIST; 
-                    endcase
+                    fsm_state <= (health_error) ? DEAD : ((Keccak_ready) ? WAIT_FOR_XFER : BIST);
                 end
                 WAIT_FOR_XFER: begin
                     get_raw_entropy <= 0;  // no entropy collection when waiting for acknowledgement
+                    dead_flag <= 0;
 
                     // Increment exactly once per completed key transfer
                     if(!Keccak_ready) drbg_cntr <= (drbg_cntr == (DRBG_CNTR_WIDTH)'(DRBG_CYCLES-1)) ? 0 : drbg_cntr + 1;
                     else drbg_cntr <= drbg_cntr; 
 
-                    // state transition
-                    case({total_failure, health_error})
-                        // keeps on waiting until keccak ready becomes low which indicates all requests from AES_GCM have been acknowledged
-                        2'b00: fsm_state <= (!Keccak_ready) ? BIST : WAIT_FOR_XFER;  
-                        2'b01: fsm_state <= ERROR_RECOVERY;  // since an error has occurred, goes to error recovery state
-                        2'b10, 2'b11: fsm_state <= DEAD;  // since both cases have total_failure = 1, goes to DEAD state waiting for external reset 
-                        default: fsm_state <= WAIT_FOR_XFER; 
-                    endcase
-                end
-                ERROR_RECOVERY: begin
-                    // resets noise source, entropy collector and Keccak conditioning block 
-                    // since they gave psuedo randomness instead of true randomness
-                    local_rst_n <= 0;
-                    drbg_cntr <= 0;  // resetting this so that Keccak block can start using raw entropy instead of DRBG feedback
-
-                    err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
-                    fsm_state <= (err_state_delay) ? BIST : ERROR_RECOVERY;
+                    fsm_state <= (health_error) ? DEAD : ((!Keccak_ready) ? BIST : WAIT_FOR_XFER);
                 end
                 DEAD: begin
                     // deasserting signals as total failure occurred
                     noise_src_enb_n <= 1;
-                    enb_health_tests <= 0;
+                    enb_health_tests_n <= 1;
                     get_raw_entropy <= 0;
                     drbg_cntr <= 0;
-
-                    // asseting dead_flag and waiting for external reset
-                    dead_flag <= 1;
-                    local_rst_n <= (ext_rst_n == 0) ? 0 : 1;  // restting other blocks
-
-                    err_state_delay <= err_state_delay + 1;  // gives 1 cycle delay so that reset values settle in
-                    fsm_state <= (err_state_delay) ? IDLE : DEAD;
+                    dead_flag <= 1;  // indicates that whole TRNG block need reset to boot
+                    fsm_state <= DEAD;  // waits in this state until ext_rst_n is asserted which inturn asserts local_rst_n to reset all blocks
                 end
-                default: fsm_state <= IDLE;
             endcase
         end
     end
