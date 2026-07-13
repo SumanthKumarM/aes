@@ -1,6 +1,6 @@
 /**
  * This block can support all standard KEY sizes (i.e 128, 192 & 256-bit). So, this block is compatible with multi KEY size transactions
- * This blok internally instantiates Sbox which is used in KeyExpansion logic when special conditions are met which are defined in AES standard
+ * This block uses Sbox which is used in KeyExpansion logic when special conditions are met which are defined in AES standard
  * KeyExpansion logic works based on the equations:
     - if i%Nk = 0 then w[i] = w[i-Nk] xor w[i-1]
     - if i%Nk != 0 then special transformation is applied, w[i] = w[i-Nk] xor subWord(RotWord(w[i-1])) xor RCON[i/Nk]
@@ -40,6 +40,10 @@ module addRoundKey(
 
     expKey_matrix_t expKey;  // expanded KEYs by KeyExpansion logic
     expKey_matrix_t prev_expKey;  // these are previous round KEYs which are used in current round
+    logic gated_clk;  // gated clock to reduce dynamic power consumption
+
+    // ICG cell to reduce dynamic power consumption
+    icg ICG(gated_clk, (~enb_n | ark_done), clk);  // ark_done is also included in enable because AddRoundKey needs another clk cycle so that it enters disable branch and clears ark_done 
 
     // function that return RCON index based on CIPHER round
     function automatic unibble rcon_idx(input unibble rn, input unibble Nk);
@@ -185,7 +189,7 @@ module addRoundKey(
     end
 
     // core logic of addRoundKey()
-    always_ff @(posedge clk) begin
+    always_ff @(posedge gated_clk) begin
         if(!rst_n) begin
             ark_done <= 0;
 
