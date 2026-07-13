@@ -252,6 +252,7 @@ module sbox(
 
     import sbox_funcs::*;
 
+    logic gated_clk;  // gated clock to reduce dynamic power consumption
     logic [127:0] masked_a_byte;  // to store a1 and a0
     logic [127:0] denominator;  // stores denominator value corresponding to every state element
     logic [127:0] masked_d_inv;  // stores inverse of denominator of every state element
@@ -263,8 +264,11 @@ module sbox(
     sbox_states fsm_state;
     genvar i;
 
+    // ICG cell to reduce dynamic power consumption
+    icg ICG(gated_clk, (enb_n ^ _enb_n), clk);
+
     // separate sequental block is used to update FSM states, sbox_done and rst_trng so as to avoid being driven for multiple times
-    always_ff @(posedge clk) begin
+    always_ff @(posedge gated_clk) begin
         if(!rst_n) begin
             sbox_ready <= 0;
             rst_trng <= 0;
@@ -364,7 +368,7 @@ module sbox(
     // this block computes corresponding values for every byte of input state array
     generate
         for(i=0; i<4; i++) begin  // this portion is common for both modes
-            always_ff@(posedge clk) begin
+            always_ff@(posedge gated_clk) begin
                 if(!rst_n) begin
                     masked_a_byte[(8*i) +: 8] <= 0;
                     denominator[(8*i) +: 8] <= 0;
@@ -415,7 +419,7 @@ module sbox(
         end
 
         for(i=4; i<16; i++) begin  // this portion is only functional when SBox is supposed to operate on state matrix
-            always_ff@(posedge clk) begin
+            always_ff@(posedge gated_clk) begin
                 if(!rst_n) begin
                     masked_a_byte[(8*i) +: 8] <= 0;
                     denominator[(8*i) +: 8] <= 0;

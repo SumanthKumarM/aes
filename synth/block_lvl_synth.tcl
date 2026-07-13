@@ -12,13 +12,16 @@ proc get_block_dependencies { block } {
 
     switch -exact -- $block {
         "cipher" {
-            lappend deps "sbox.sv" "shiftRows.sv" "mixColumns.sv" "addRoundKey.sv"
+            lappend deps "sbox.sv" "shiftRows.sv" "mixColumns.sv" "addRoundKey.sv" "icg.sv"
         }
         "addRoundKey" {
-            lappend deps "sbox.sv"
+            lappend deps "icg.sv"
+        }
+        "sbox" {
+            lappend deps "icg.sv"
         }
         "trng_sbox_top" {
-            lappend deps "trng.sv" "sbox.sv"
+            lappend deps "trng.sv" "sbox.sv" "icg.sv"
         }
         default {
             # No external dependencies for this block

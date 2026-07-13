@@ -48,7 +48,7 @@ GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top
 
 # RTL sources
 BLOCK_DEPS =
-VERILOG_SOURCES = $(TYPEDEF_PKG)
+VERILOG_SOURCES = $(TYPEDEF_PKG) $(RTL_DIR)/icg.sv
 
 ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
@@ -65,6 +65,8 @@ else ifeq ($(block),cipher_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),icg)
+	# icg.sv is already in base VERILOG_SOURCES, so not needed here
 else
 	VERILOG_SOURCES += $(RTL_DIR)/$(block).sv
 endif
@@ -107,7 +109,7 @@ endif
 .PHONY: compile_rtl
 compile_rtl: $(BLOCK_DEPS)
 	@echo "Compiling RTL for $(block) with Verilator..."
-	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) -I$(RTL_DIR) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
+	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
 	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
 
 .PHONY: run_all
