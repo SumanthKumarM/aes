@@ -28,7 +28,19 @@ SELECTED_TOOL := $(strip $(tool))
 # vivado paths
 VIVADO = vivado -mode batch -notrace
 VIVADO_LINT  = vivado -mode batch -notrace -journal $(LINT_DIR)/vivado.jou -log $(LINT_DIR)/vivado.log
-VIVADO_SYNTH = vivado -mode batch -notrace -journal $(SYNTH_DIR)/vivado.jou -log $(SYNTH_DIR)/vivado.log
+
+# schematic ?= (unset) -- pass `schematic=1` to `make synth` to additionally
+# generate a schematic PDF. That needs GUI context (start_gui), so it switches
+# Vivado into `-mode tcl` instead of the default headless `-mode batch`; a
+# real Vivado window will pop up on screen for that step. Without it, synth
+# stays batch-mode: fast, headless, memory-safe, area/power/timing reports only.
+schematic ?=
+ifeq ($(strip $(schematic)),)
+    VIVADO_SYNTH_MODE = batch
+else
+    VIVADO_SYNTH_MODE = tcl
+endif
+VIVADO_SYNTH = vivado -mode $(VIVADO_SYNTH_MODE) -notrace -journal $(SYNTH_DIR)/vivado.jou -log $(SYNTH_DIR)/vivado.log
 
 # Verilator specific flags
 EXTRA_ARGS += --trace --trace-structs 
@@ -166,7 +178,7 @@ lint:
 synth: $(BLOCK_DEPS)
 	@echo "Running synthesis for $(block) using $(tool)..."
 	@if [ "$(SELECTED_TOOL)" = "vivado" ]; then \
-		cd $(SYNTH_DIR) && $(VIVADO_SYNTH) -source block_lvl_synth.tcl -tclargs $(block) 2>&1 | tee $(SYNTH_DIR)/vivado_synth.log; \
+		cd $(SYNTH_DIR) && $(VIVADO_SYNTH) -source block_lvl_synth.tcl -tclargs $(block) $(if $(schematic),schematic,) 2>&1 | tee $(SYNTH_DIR)/vivado_synth.log; \
 	elif [ "$(SELECTED_TOOL)" = "yosys" ]; then \
 		cd $(SYNTH_DIR) && BLOCK=$(block) python3 block_lvl_synth_gen.py 2>&1 | tee $(SYNTH_DIR)/yosys_synth.log; \
 	else \

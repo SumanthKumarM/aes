@@ -237,12 +237,12 @@ package sbox_funcs;
 endpackage
 
 module sbox(
-    output logic [127:0] subBytes,  // subByte of each element of state array
+    output u128_t subBytes,  // subByte of each element of state array
     output logic sbox_ready,  // tells trng that s-box is ready to accept random bits
     output logic sbox_done_pulse,  // indicates that Sbox has computed required subBytes
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
-    input logic [127:0] state,  // 128-bit input state matrix to s-box
+    input u128_t state,  // 128-bit input state matrix to s-box
     input logic [1679:0] rand_num,  // random bits from TRNG
     input logic trng_key_valid,  // asserted by TRNG when it has random bits to give to s-box
     input logic proceed,  // asserted by CIPHER/AddRoundKey to allow SBox to advance to next state only when CIPHER/AddRoundKey has aknowledged
@@ -253,11 +253,11 @@ module sbox(
     import sbox_funcs::*;
 
     logic gated_clk;  // gated clock to reduce dynamic power consumption
-    logic [127:0] masked_a_byte;  // to store a1 and a0
-    logic [127:0] denominator;  // stores denominator value corresponding to every state element
-    logic [127:0] masked_d_inv;  // stores inverse of denominator of every state element
-    logic [255:0] masks_of_A_inv;  // stores every element of state array in tower field inversion form
-    logic [255:0] masks_of_b_inv;  // stores inverse of every elemnt of state array
+    u128_t masked_a_byte;  // to store a1 and a0
+    u128_t denominator;  // stores denominator value corresponding to every state element
+    u128_t masked_d_inv;  // stores inverse of denominator of every state element
+    u256_t masks_of_A_inv;  // stores every element of state array in tower field inversion form
+    u256_t masks_of_b_inv;  // stores inverse of every elemnt of state array
     logic [1:0] sbox_cntr;  // keeps track of how many times Sbox has computed subBytes
     logic sbox_done, sbox_done_d;  // these are registered done signals which stay high more than 1 cycle
     logic [10:0] slice_sel;  // required to select particular slice of rand_num
@@ -353,7 +353,7 @@ module sbox(
         end
     end
 
-    // slice_sel helps to select required 448-bit slice of rand_num 
+    // slice_sel helps to select required 448-bit/112-bit slice of rand_num 
     always_comb begin
         case(sbox_cntr)
             2'b00: slice_sel = (!enb_n && _enb_n) ? 0 : ((enb_n && !_enb_n) ? 448 : 0);
