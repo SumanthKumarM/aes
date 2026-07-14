@@ -19,12 +19,9 @@ synth/*.jou
 synth/*.log
 synth/*.v
 synth/*.backup.*
-docs/sbox.pdf
-docs/sbox.html
-docs/trng.html
-docs/trng.pdf
-docs/keyExp_logic.html
-docs/keyExp_logic.pdf
+synth/.Xil/
+docs/*html
+docs/*pdf
 lint/*.jou
 lint/*.log
 lint/*.backup.*

@@ -1,9 +1,10 @@
 # Args
-if {$argc != 1} {
-    puts "Error: Usage: vivado -source block_lvl_synth.tcl -tclargs <block_name>"
+if {$argc < 1 || $argc > 2} {
+    puts "Error: Usage: vivado -source block_lvl_synth.tcl -tclargs <block_name> \[schematic\]"
     exit 1
 }
 set block [lindex $argv 0]
+set gen_schematic [expr {$argc == 2 && [lindex $argv 1] eq "schematic"}]
 set RTL_DIR [file normalize "../rtl"]
 
 # Define block dependencies
@@ -85,6 +86,12 @@ proc discover_sources { rtl_dir block } {
     return $sources
 }
 
+# Cap synth_design's internal multithreading. Default is (nproc - 1), which on
+# an 8-core/7.4GB machine oversubscribes memory during the heavier optimization
+# phases (Cross Boundary and Area Optimization in particular) and gets the main
+# process OOM-killed. Lower peak memory at the cost of longer wall-clock time.
+set_param general.maxThreads 2
+
 # Project + RTL
 create_project -in_memory -part xc7a35tcsg324-1
 
@@ -93,22 +100,49 @@ foreach f $source_files {
     read_verilog -sv $f
 }
 
-# Synthesize
-synth_design -top $block -part xc7a35tcsg324-1 -flatten_hierarchy rebuilt
+# Synthesize. -flatten_hierarchy none (vs. rebuilt) skips fully collapsing the
+# module hierarchy before optimizing -- cheaper in memory, and fine here since
+# icg.sv is just a clock-gate leaf cell, not something on sbox's data-path
+# critical path, so keeping it as a separate hierarchical instance doesn't
+# affect the timing numbers we care about.
+synth_design -top $block -part xc7a35tcsg324-1 -flatten_hierarchy none
 
 set design_name [get_designs]
 current_design $design_name
 
-# Reports
+# Clock constraint — required for Vivado's STA engine to analyze any reg-to-reg
+# path at all, and for report_power's dynamic-power estimate to mean anything
+# (it scales with frequency). 100MHz/10ns is a placeholder target, not a claim
+# about what this design can hit -- tune it once you have a real target. Either
+# way, "Data Path Delay" in the detailed timing report below is the raw cell+net
+# propagation delay and is independent of this period value, so it reflects the
+# true critical path regardless of what you set here.
+create_clock -period 10.000 -name clk [get_ports clk]
+
+# Reports: area, power, timing
 report_utilization -file "${block}_utilization.rpt"
+report_power -file "${block}_power.rpt"
 report_timing_summary -file "${block}_timing.rpt"
+report_timing -delay_type max -sort_by group -path_type full -nworst 10 -file "${block}_timing_detail.rpt"
 write_checkpoint -force "${block}_synth.dcp"
 
-# Schematic — requires GUI context to render
-start_gui
-show_schematic [get_cells -hierarchical]
-write_schematic -format pdf -force -orientation landscape "${block}_schematic.pdf"
-stop_gui
+# Schematic — opt-in only (pass `schematic=1` to `make synth`), since it needs
+# an active GUI context: show_schematic/write_schematic are silent no-ops
+# without it (confirmed empirically -- no error, just no file). start_gui
+# requires this process to be launched with `-mode tcl` (or `-mode gui`),
+# never `-mode batch` -- the Makefile picks the mode based on `schematic=`.
+if {$gen_schematic} {
+    if {[catch {
+        start_gui
+        show_schematic [get_cells -hierarchical]
+        write_schematic -format pdf -force -orientation landscape "${block}_schematic.pdf"
+        stop_gui
+    } err]} {
+        puts "Warning: schematic generation failed: $err"
+    }
+} else {
+    puts "Skipping schematic (pass schematic=1 to 'make synth' to enable)."
+}
 
 puts "--- Synthesis complete for $block ---"
 exit
