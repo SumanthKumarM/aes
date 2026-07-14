@@ -33,6 +33,16 @@ package type_defs_pkg;
         RESET_TRNG
     } sbox_states;
 
+    typedef enum logic [2:0] {
+        INIT,
+        INV_AFFINE_TOWER_FIELD,
+        MASKED_D,
+        MASKED_D_INV,
+        MASKED_A_INV,
+        MASKED_B_INV,
+        SUB_BYTES
+    } invSbox_states;
+
     typedef enum logic {
         PRE_ADDROUNDKEY, 
         ADDROUNDKEY
