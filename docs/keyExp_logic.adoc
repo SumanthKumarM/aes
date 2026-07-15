@@ -20,7 +20,7 @@ AES-256 extra rule:
 if Nk = 8 and i mod Nk = 4: w[i] = w[i-Nk] xor SubWord(w[i-1])
 ----
 
-A direct hardware translation of this recurrence would require storing the *entire* key schedule (44/52/60 words). This design instead uses a **rolling register bank** sized to exactly `Nk` words, regenerated on demand as the cipher consumes it round by round.
+A direct hardware translation of this recurrence would require storage of the entire key schedule (44/52/60 words). This design employs a **rolling register bank** sized to exactly `Nk` words, regenerated on demand as the cipher consumes it round by round.
 
 == Rolling Register Bank Strategy
 
@@ -29,7 +29,7 @@ The core structural idea: `AddRoundKey` does not track the global word index `i`
 * `prev_expKey[0..Nk-1]` — the currently "active" batch, consumed by AddRoundKey
 * `expKey[0..Nk-1]` — the *next* batch, computed combinationally from `prev_expKey`
 
-Because a fresh `Nk`-word key-expansion batch produces more or fewer words than the 4 the cipher consumes per round, the two register banks drift in and out of phase with the round counter. The block re-triggers key expansion exactly when the active batch is exhausted, and simply advances an internal read offset when leftover words are still available. This means:
+Since a fresh `Nk`-word key-expansion batch produces a different number of words than the 4 words consumed by the cipher per round, the two register banks drift in and out of phase with the round counter. The block re-triggers key expansion when the active batch is exhausted and advances an internal read offset when leftover words are available. This yields the following characteristics:
 
 * **AES-128 (`Nk=4`):** batch size equals words-per-round (4). Every round triggers a fresh expansion — no leftover words, no offset tracking needed.
 * **AES-192 (`Nk=6`):** batch size (6) does not divide evenly into the round consumption (4). This produces a repeating 3-round pattern of *fresh / leftover+fresh / leftover* — worked out in full below.
@@ -67,15 +67,15 @@ For `Nk=6`, there are 13 total rounds (`Nr=12`) where AddRoundKey is used. Key e
 
 === Step-by-Step Trace
 
-**Round 0 (pre-whitening):** the 192-bit `master_key` is loaded directly into `prev_expKey[0..5]`. The cipher consumes the first 4 words (`w0..w3`); `w4` and `w5` are left untouched in the bank.
+**Round 0 (pre-whitening):** the 192-bit `master_key` is loaded directly into `prev_expKey[0..5]`. The cipher consumes the first 4 words (`w0..w3`); `w4` and `w5` remain in the bank.
 
-**Round 1:** the cipher first reads the leftover `w4, w5` from round 0. A key-expansion step then triggers, computing an entirely new 6-word batch and overwriting the bank. The cipher takes the newly computed `w0, w1` to complete its 4-word requirement. New `w2..w5` remain untouched.
+**Round 1:** the cipher reads the remaining `w4, w5` from round 0. A key-expansion step is triggered, computing a new 6-word batch and overwriting the bank. The cipher then uses the newly computed `w0, w1` to complete its 4-word requirement. Words `w2..w5` remain in the bank.
 
-**Round 2:** `w2, w3, w4, w5` are already sitting untouched from round 1's batch — the cipher consumes all 4 directly. *No expansion is triggered this round*, and the bank is now fully drained.
+**Round 2:** words `w2, w3, w4, w5` from round 1's batch are already resident in the bank. The cipher consumes all 4 directly. No expansion is triggered, and the bank is fully drained.
 
-**Round 3:** the bank is exhausted, so a new batch is computed and the cipher takes `w0..w3` of it. `w4, w5` are left over, and the 3-round cycle repeats.
+**Round 3:** the bank is empty, so a new batch is computed and the cipher takes `w0..w3`. Words `w4, w5` remain, and the 3-round cycle repeats.
 
-This fresh / leftover+fresh / leftover pattern repeats every 3 rounds until round 12 (the final round), which lands on a fresh-batch boundary.
+This pattern (fresh / leftover+fresh / leftover) repeats every 3 rounds through round 12 (the final round), which aligns with a fresh-batch boundary.
 
 === AES-192 Word Concatenation Matrix (Rounds 0–12)
 
@@ -116,11 +116,11 @@ For `Nk=8`, there are 15 total rounds (`Nr=14`). The batch size (8 words) is exa
 
 The AES-256 schedule has one extra FIPS rule not present in AES-128/192: when `i mod Nk = 4`, the transformation applies `SubWord()` alone (no rotation, no round constant). This is why odd rounds (`round_num[0] = 1`) route `sbox_state` from `prev_expKey[3]` (the last word of the *current* batch's low half) without `rotWord()`, while even rounds route from `prev_expKey[7]` *with* `rotWord()`.
 
-**Round 1 is a special case**: although it is an odd round, it does not perform any expansion — both halves of the master key (`w0..w7`) are already resident from round 0's load, and round 1 simply consumes the second half (`w4..w7`) directly. Genuine `SubWord`-only expansion begins at round 3, not round 1.
+**Round 1 is a special case**: although it is classified as an odd round, it does not perform expansion. Both halves of the master key (`w0..w7`) are already resident from round 0's load, and round 1 consumes the second half (`w4..w7`) directly. Expansion using `SubWord`-only transformation begins at round 3.
 
 == RCON Round-Constant Indexing
 
-FIPS 197 indexes `RCON[]` by the *key-expansion batch count*, i.e. how many times a fresh `Nk`-word batch has been generated so far — not by the cipher round number directly. Since the RTL only carries `round_num`, a conversion function (`div_Nk`) maps round number to batch count per key size:
+FIPS 197 indexes `RCON[]` by the key-expansion batch count (the number of times a fresh `Nk`-word batch has been generated) rather than by the cipher round number directly. Since the RTL implementation carries only `round_num`, a conversion function (`div_Nk`) maps the round number to the batch count for each key size:
 
 [cols="1,2,3"]
 |===
@@ -131,7 +131,7 @@ FIPS 197 indexes `RCON[]` by the *key-expansion batch count*, i.e. how many time
 | AES-256 (Nk=8) | 2, 4, 6, 8, 10, 12, 14 (even only)| `round_num / 2`
 |===
 
-For AES-192, the batch-index formula falls directly out of the 3-round repeating cycle described above: one new batch is generated every 3 rounds on average, with the first batch generated one round early (round 1, not round 1.5). Verifying a few points: round 1 → batch 1, round 3 → batch 2, round 4 → batch 3, round 12 → batch 8 — matching the table in <<AES-192 (Nk = 6) Mapping>>.
+For AES-192, the batch-index formula derives directly from the 3-round repeating cycle: one new batch is generated every 3 rounds on average, with the first batch generated at round 1 (rather than at round 1.5). Validation: round 1 yields batch 1, round 3 yields batch 2, round 4 yields batch 3, and round 12 yields batch 8, matching the table in <<AES-192 (Nk = 6) Mapping>>.
 
 The RCON lookup table itself follows FIPS 197 directly (`RCON[1] = 0x01000000`, doubling in `GF(2^8)` up to `RCON[10] = 0x36000000`), with index 0 reserved as an unused padding entry so the RTL array index matches the FIPS spec index 1:1.
 

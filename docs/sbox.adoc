@@ -165,7 +165,7 @@ C₁ = A₁·B₁ ⊕ R
 C₂ = A₁·B₂ ⊕ A₂·B₁ ⊕ A₂·B₂ ⊕ R
 ----
 
-Verification: `C₁ ⊕ C₂ = (A₁ ⊕ A₂)(B₁ ⊕ B₂) = A·B` ✓
+Verification: `C₁ ⊕ C₂ = (A₁ ⊕ A₂)(B₁ ⊕ B₂) = A·B`
 
 Neither C₁ nor C₂ individually reveals A·B. R cancels upon recombination.
 
@@ -200,9 +200,9 @@ D₁ = a₁ₘ²·λ ⊕ P₁ ⊕ a₀ₘ²
 D₂ = a₁ᵣ²·λ ⊕ P₂ ⊕ a₀ᵣ²
 ----
 
-Verification: `D₁ ⊕ D₂ = a₁²λ ⊕ a₁a₀ ⊕ a₀² = D` ✓
+Verification: `D₁ ⊕ D₂ = a₁²λ ⊕ a₁a₀ ⊕ a₀² = D`
 
-*D is born already in masked form. It is never computed in the clear.*
+The denominator D exists exclusively in masked form. It is never computed in the clear.
 
 == Computing D⁻¹ in Masked Form
 
@@ -225,7 +225,7 @@ Q₁ = D₁⁸·D₁⁴ ⊕ R₄
 Q₂ = D₁⁸·D₂⁴ ⊕ D₂⁸·D₁⁴ ⊕ D₂⁸·D₂⁴ ⊕ R₄
 ----
 
-Verification: `Q₁ ⊕ Q₂ = D⁸·D⁴` ✓
+Verification: `Q₁ ⊕ Q₂ = D⁸·D⁴`
 
 === Second Masked Multiply — (D⁸·D⁴) · D² using R₅
 
@@ -234,7 +234,7 @@ E₁ = Q₁·D₁² ⊕ R₅
 E₂ = Q₁·D₂² ⊕ Q₂·D₁² ⊕ Q₂·D₂² ⊕ R₅
 ----
 
-Verification: `E₁ ⊕ E₂ = D⁸·D⁴·D² = D¹⁴ = D⁻¹` ✓
+Verification: `E₁ ⊕ E₂ = D⁸·D⁴·D² = D¹⁴ = D⁻¹`
 
 == Computing A⁻¹ in Masked Form
 
@@ -247,7 +247,7 @@ F₁ = E₁·a₁ₘ ⊕ R₆
 F₂ = E₁·a₁ᵣ ⊕ E₂·a₁ₘ ⊕ E₂·a₁ᵣ ⊕ R₆
 ----
 
-Verification: `F₁ ⊕ F₂ = D⁻¹·a₁ = new_a₁` ✓
+Verification: `F₁ ⊕ F₂ = D⁻¹·a₁ = new_a₁`
 
 === Masked Multiply D⁻¹ · (a₁ ⊕ a₀) using R₇
 
@@ -256,7 +256,7 @@ G₁ = E₁·(a₁ₘ ⊕ a₀ₘ) ⊕ R₇
 G₂ = E₁·(a₁ᵣ ⊕ a₀ᵣ) ⊕ E₂·(a₁ₘ ⊕ a₀ₘ) ⊕ E₂·(a₁ᵣ ⊕ a₀ᵣ) ⊕ R₇
 ----
 
-Verification: `G₁ ⊕ G₂ = D⁻¹·(a₁ ⊕ a₀) = new_a₀` ✓
+Verification: `G₁ ⊕ G₂ = D⁻¹·(a₁ ⊕ a₀) = new_a₀`
 
 == Optimized GF(2⁴) Squarer
 
@@ -344,7 +344,7 @@ b′ = b_prime_share1 ⊕ b_prime_share2
 
 == Verification
 
-The S-Box output must match the official AES S-Box table defined in *FIPS-197*.
+The S-Box output is verified to match the official AES S-Box table defined in *FIPS-197*.
 
 Example test vector:
 
@@ -353,7 +353,7 @@ Input:  0x53
 Output: 0xED
 ----
 
-All *256 possible inputs* must produce identical outputs to the standard AES S-Box.
+All 256 possible input values are verified to produce identical outputs to the standard AES S-Box.
 
 == FSM State Pipelining: Design Rationale and Timing Analysis
 
@@ -427,9 +427,7 @@ Each computation stage evaluates one of the masked functions from the `sbox_func
 
 === Analysis: Impact of Alternative FSM Configurations
 
-A fundamental question arises: *Would reducing the FSM state count to 3 or 4 states by merging multiple functions improve overall performance?*
-
-Static timing analysis demonstrates that such restructuring would be detrimental:
+A key design consideration is whether reducing the FSM state count to 3 or 4 states by merging multiple functions would improve overall performance. Static timing analysis demonstrates that such restructuring would be detrimental:
 
 **Scenario 1: Merging MASKED_D and MASKED_D_INV into a Single State**
 
@@ -447,7 +445,7 @@ Static timing analysis demonstrates that such restructuring would be detrimental
 * Required clock period: 22–25 ns, yielding 40–45 MHz operation (55–60% frequency reduction)
 * Resulting throughput: 16 bytes per 2 cycles at 40 MHz = 320 MB/s (offers no sustainable advantage given the power cost and area overhead)
 
-**Fundamental Constraint:** Routing delay (6.982 ns, or 78.4% of the critical path) is architecture-independent and cannot be eliminated through FSM-level restructuring. Merging states increases combinational depth while leaving routing delay invariant, resulting in longer critical paths and reduced clock frequency. The pipelined 6-state decomposition optimally partitions logic to fit within each stage's routing budget.
+**Fundamental Constraint:** Routing delay (6.982 ns, or 78.4% of the critical path) is intrinsic to the physical architecture and cannot be reduced through FSM-level restructuring alone. Merging computational states increases combinational depth while routing delay remains invariant, resulting in degraded timing margins and reduced clock frequency. The pipelined 6-state decomposition effectively partitions logic to operate within the routing budget of each stage.
 
 === Pipelining Benefits
 
@@ -499,18 +497,18 @@ The 0.977 ns slack margin provides opportunity for timing-constraint relaxation 
 
 === Conclusion
 
-The 6-state FSM design is substantiated by comprehensive timing analysis. Key findings are:
+The 6-state FSM design is supported by comprehensive timing analysis. Key findings are:
 
 . Achieves 100 MHz operation with 0.977 ns setup margin, adequate for process and temperature corner cases
-. Routing delays (78.4% of critical path) are architecture-invariant; FSM state reduction provides no proportional benefit
-. Pipelined decomposition enables place-and-route tools to optimize each stage independently, mitigating congestion-induced timing penalties
-. Delivers the maximum throughput (267 MB/s) relative to frequency headroom and gate count
-. Demonstrates portability across FPGA device families (Artix-7, Kintex-7, Virtex-7) without substantive restructuring
-. Provides margin for robustness under temperature, voltage, and process variation
+. Routing delays (78.4% of critical path) are architecture-invariant; FSM state reduction provides no proportional improvement
+. Pipelined decomposition enables placement and routing tools to optimize each stage independently, reducing congestion-induced timing penalties
+. Delivers maximum throughput (267 MB/s) relative to frequency headroom and area utilization
+. Demonstrates portability across FPGA device families (Artix-7, Kintex-7, Virtex-7) without significant restructuring
+. Provides adequate margin for robustness under temperature, voltage, and process variation
 
-Alternative configurations (fewer states, deeper logic) would inevitably result in frequency reduction without proportional throughput gains. Merging states increases combinational depth and routing congestion without eliminating the invariant interconnect delays that dominate the critical path.
+Alternative configurations (fewer states, deeper combinational logic) would necessarily result in frequency reduction without proportional throughput improvement. Merging states increases combinational depth and routing congestion without reducing the architecture-invariant interconnect delays that dominate the critical path.
 
-The 6-state pipeline architecture represents an optimal engineering balance among latency, achievable clock frequency, sustained throughput, area efficiency, and implementation portability on contemporary FPGA platforms.
+The 6-state pipeline architecture achieves an optimal balance among latency, achievable clock frequency, sustained throughput, area efficiency, and portability to contemporary FPGA platforms.
 
 == References
 

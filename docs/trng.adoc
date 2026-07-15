@@ -74,8 +74,8 @@ Configuration used in this design:
 
 == Entropy Amplification via XOR Mixing
 
-Each ring oscillator produces a waveform containing jitter.
-To improve entropy quality, oscillator outputs are combined using an XOR tree:
+Each ring oscillator produces a waveform containing timing jitter.
+To enhance entropy quality, oscillator outputs are combined using an XOR tree:
 
 ----
 RO₀  ─────┐
@@ -86,7 +86,7 @@ RO₂  ─────┤
 RO₃₁ ─────┘
 ----
 
-XOR mixing combines multiple independent noise sources, increasing overall entropy.
+XOR mixing combines multiple independent noise sources, resulting in higher overall entropy from the composite signal.
 
 == Sampling the Entropy Signal
 
@@ -101,9 +101,9 @@ Each clock cycle produces one raw entropy bit.
 
 == Health Tests
 
-The raw entropy stream is continuously monitored using runtime health tests to ensure the entropy source has not failed or become biased.
+The raw entropy stream is continuously monitored using runtime health tests to verify that the entropy source has not failed or become biased.
 
-*Runtime Error Handling:* If either test fails, the TRNG immediately transitions to an **unrecoverable DEAD state**, halting all key generation. The device requires an external reset (`ext_rst_n`) to resume operation. No error recovery is attempted — any detected anomaly is treated as a critical malfunction.
+*Runtime Error Handling:* If either test fails, the TRNG immediately transitions to an unrecoverable DEAD state, halting all key generation. The device requires an external reset (`ext_rst_n`) to resume operation. No error recovery is attempted; any detected anomaly is treated as a critical failure.
 
 === Repetition Count Test (RCT)
 
@@ -123,17 +123,17 @@ The raw entropy stream is continuously monitored using runtime health tests to e
 
 == Control Unit FSM
 
-The Control Unit manages the TRNG state machine with a *fail-fast error handling model*:
+The Control Unit manages the TRNG state machine using a fail-fast error handling model:
 
-* *IDLE:* Warm-up state; noise source and health tests are disabled; keccak held in reset.
-* *BIST:* Built-in Self-Test; health tests monitor the raw bitstream; keccak processes entropy.
-  - If `health_error` asserted → immediately transition to DEAD (no recovery).
-* *WAIT_FOR_XFER:* Awaiting handshake from Sbox; key output is available.
-  - If `health_error` asserted → immediately transition to DEAD.
-* *DEAD:* Unrecoverable failure state; all outputs disabled; device halts key generation.
-  - Remains in DEAD until external reset (`ext_rst_n` assertion).
+* *IDLE:* Initialization state; noise source and health tests are disabled; Keccak held in reset.
+* *BIST:* Built-in Self-Test state; health tests continuously monitor the raw bitstream; Keccak processes entropy.
+  - If `health_error` is asserted, immediate transition to DEAD state occurs (no recovery mechanism).
+* *WAIT_FOR_XFER:* Awaiting handshake from S-Box; key output is available.
+  - If `health_error` is asserted, immediate transition to DEAD state occurs.
+* *DEAD:* Unrecoverable failure state; all outputs disabled; key generation is halted.
+  - Remains in DEAD state until external reset (`ext_rst_n`) is applied.
 
-*Design Philosophy:* Errors are fatal. This simplifies the implementation and ensures that any detected anomaly immediately prevents further random generation, protecting against side-channel leakage from a compromised entropy source.
+*Design Rationale:* Any detected error is treated as fatal. This approach simplifies the implementation and ensures that anomalies immediately prevent further random generation, protecting against side-channel leakage from a compromised entropy source.
 
 == Entropy Collector
 
@@ -284,17 +284,17 @@ These properties ensure strong resistance against *first-order side-channel atta
 
 == Verification
 
-The TRNG is verified using *Cocotb-based simulation*:
+TRNG verification is performed using Cocotb-based simulation:
 
-* entropy injection models
-* bias detection tests
-* stuck-bit fault tests
-* health test validation
+* Entropy injection models
+* Bias detection tests
+* Stuck-bit fault scenarios
+* Health test validation
 * Keccak permutation verification
 
 == Summary
 
-The TRNG converts *physical hardware noise* into *cryptographically strong random numbers*.
+The TRNG converts physical hardware noise into cryptographically strong random numbers through a multi-stage conditioning pipeline.
 
 ----
 Physical noise
@@ -314,7 +314,7 @@ Keccak-f[1600] conditioning (24 rounds)
 Random mask values R₁ … R₇
 ----
 
-These random values protect masked AES operations against side-channel attacks.
+These random values provide protection for masked AES operations against side-channel attacks.
 
 == References
 
