@@ -282,7 +282,7 @@ module sbox(
                 case(fsm_state)
                     INIT: begin  // this state handles the handshake and accepting SBox inputs
                         // s-box is ready to accept random bits only when all random bits are consumed and this signal functions only when enb_n = 0 else it freezes
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : ((sbox_cntr == 0) ? 1 : 0);
+                        sbox_ready <= (enb_n && !_enb_n) ? 0 : ((sbox_cntr == 0) ? 1 : 0);
                         rst_trng <= 0;
                         sbox_done <= 0;
 
@@ -290,45 +290,51 @@ module sbox(
                         else begin
                             if(enb_n && !_enb_n) fsm_state <= TOWER_FIELD;  // when only portion of SBox is required
                             else begin  // when whole SBox is enabled
-                                if(sbox_cntr == 0) fsm_state <= (trng_key_valid) ? TOWER_FIELD : INIT;
+                                // fsm waits for both signals so TRNG updating random bits and SBox transitioning to next happen stay in sync
+                                // which lets TOWER_FIELD state get actual new batch of random bits from TRNG 
+                                if(sbox_cntr == 0) fsm_state <= (trng_key_valid && sbox_ready) ? TOWER_FIELD : INIT;
                                 else fsm_state <= TOWER_FIELD;
                             end
                         end
                     end
                     TOWER_FIELD: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D;
                     end 
                     MASKED_D: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                     end
                     MASKED_D_INV: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                     end
                     MASKED_A_INV: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                     end
                     MASKED_B_INV: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                     end
                     SUB_BYTES: begin
-                        sbox_ready <= (enb_n && !_enb_n) ? sbox_ready : 0;
+                        sbox_ready <= 0;
                         rst_trng <= 0;
-                        sbox_cntr <= (enb_n && !_enb_n) ? sbox_cntr : ((sbox_cntr == 2) ? 0 : sbox_cntr + 1);  // updating since Sbox has computed subBytes only when enb_n is low
+
+                        // updating since Sbox has computed subBytes only when enb_n is low
+                        if(enb_n && !_enb_n) sbox_cntr <= sbox_cntr;
+                        else sbox_cntr <= (!proceed) ? sbox_cntr : ((sbox_cntr == 2) ? 0 : sbox_cntr + 1);
+
                         sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : ((proceed) ? INIT : SUB_BYTES);  // Sbox will advance to next state only when CIPHER/AddRoundKey has aknowledged
                     end
