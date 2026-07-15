@@ -1,29 +1,5 @@
 import type_defs_pkg::*;
-
-// this package contains the core logic of inverse SBox
-package invSbox_funcs;
-    import type_defs_pkg::*;
-
-    // function to compute inverse Affine transformation and XOR it with inverse Affine constant
-    function automatic ubyte invAffine(ubyte input encByte);
-        ubyte res;
-
-        // inverse Affine transformation - invAffine(x) = A^-1 * x, where A^-1 is the inverse Affine matrix
-        res[0] = encByte[2] ^ encByte[5] ^ encByte[7];
-        res[1] = encByte[0] ^ encByte[3] ^ encByte[6];
-        res[2] = encByte[1] ^ encByte[4] ^ encByte[7];
-        res[3] = encByte[0] ^ encByte[2] ^ encByte[5];
-        res[4] = encByte[1] ^ encByte[3] ^ encByte[6];
-        res[5] = encByte[2] ^ encByte[4] ^ encByte[7];
-        res[6] = encByte[0] ^ encByte[3] ^ encByte[5];
-        res[7] = encByte[1] ^ encByte[4] ^ encByte[6];
-
-        // XOR with inverse Affine constant (0x05)
-        res = res ^ 8'h05;
-        return res;
-    endfunction
-    
-endpackage
+import composite_field_math_pkg::*;
 
 module invSbox(
     output u128_t invSubBytes,  // invSubByte of each encrypted element of state array
@@ -37,16 +13,17 @@ module invSbox(
     input logic proceed,  // asserted by invCIPHER/AddRoundKey to allow invSBox to advance to next state only when invCIPHER/AddRoundKey has aknowledged
     input logic enb_n,  // active low enable signal to invSbox
     input logic rst_n, clk);
-    
-    import invSbox_funcs::*;
-    import sbox_funcs::*;
 
     logic gated_clk;  // gated clock to reduce dynamic power consumption
-    u128_t masked_a_byte;
+    u128_t masked_a_byte;  // to store a1 and a0
+    u128_t denominator;  // stores denominator value corresponding to every state element
+    u128_t masked_d_inv;  // stores inverse of denominator of every state element
+    u256_t masks_of_A_inv;  // stores every element of state array in tower field inversion form
     logic [1:0] invSbox_cntr;  // keeps track of how many times invSbox has computed invSubBytes
     logic invSbox_done, invSbox_done_d;  // these are registered done signals which stay high more than 1 cycle
     logic [9:0] slice_sel;  // required to select particular slice of rand_num
     invSbox_states fsm_state;
+    genvar i;
 
     // ICG cell to reduce dynamic power consumption
     icg ICG(gated_clk, ~enb_n, clk);
@@ -59,32 +36,67 @@ module invSbox(
             invSbox_done <= 0;
             invSbox_done_d <= 0;
             invSbox_cntr <= 0;
-            fsm_state <= INIT;
+            fsm_state <= ISB_INIT;
         end
         else begin
             if(!enb_n) begin  // invSbox functions since it's enabled
                 case(fsm_state)
-                    INIT: begin  // this state handles the handshake and accepting invSBox inputs
-                        // invSbox is ready to accept random bits only when all random bits are consumed and this signal functions only when enb_n = 0 else it freezes
+                    ISB_INIT: begin  // this state handles the handshake and accepting invSBox inputs
+                        // invSbox is ready to accept random bits only when all random bits are consumed
                         invSbox_ready <= (invSbox_cntr == 0) ? 1 : 0;
                         rst_trng <= 0;
                         invSbox_done <= 0;
 
-                        if(trng_dead_flag) fsm_state <= RESET_TRNG;
+                        if(trng_dead_flag) fsm_state <= ISB_RESET_TRNG;
                         else begin
-                            if(invSbox_cntr == 0) fsm_state <= (trng_key_valid) ? INV_AFFINE_TOWER_FIELD : INIT;
+                            if(invSbox_cntr == 0) fsm_state <= (trng_key_valid && invSbox_ready) ? INV_AFFINE_TOWER_FIELD : ISB_INIT;
                             else fsm_state <= INV_AFFINE_TOWER_FIELD;
                         end
                     end
-                    RESET_TRNG: begin
+                    INV_AFFINE_TOWER_FIELD: begin
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? ISB_RESET_TRNG : ISB_MASKED_D;
+                    end
+                    ISB_MASKED_D: begin
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? ISB_RESET_TRNG : ISB_MASKED_D_INV;
+                    end
+                    ISB_MASKED_D_INV: begin
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? ISB_RESET_TRNG : ISB_MASKED_A_INV;
+                    end
+                    ISB_MASKED_A_INV: begin
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 0;
+                        fsm_state <= (trng_dead_flag) ? ISB_RESET_TRNG : INV_SUB_BYTES;
+                    end
+                    INV_SUB_BYTES: begin
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 1;  // indicates that InvSbox is done computing invSubBytes
+                        invSbox_cntr <= (!proceed) ? invSbox_cntr : ((invSbox_cntr == 2) ? 0 : invSbox_cntr + 1);
+                        fsm_state <= (trng_dead_flag) ? ISB_RESET_TRNG : ((proceed) ? ISB_INIT : INV_SUB_BYTES);
+                    end
+                    ISB_RESET_TRNG: begin
                         rst_trng <= 1;  // resets TRNG as fatal error has occurred
                         invSbox_ready <= 0;
                         invSbox_done <= 0;
                         invSbox_cntr <= 0;
-                        fsm_state <= INIT;
+                        fsm_state <= ISB_INIT;
                     end
                     default: begin
-                        
+                        invSbox_ready <= 0;
+                        rst_trng <= 0;
+                        invSbox_done <= 0;
+                        invSbox_cntr <= 0;
+                        fsm_state <= ISB_INIT;
                     end
                 endcase
             end
@@ -114,23 +126,45 @@ module invSbox(
 
     // this block computes corresponding values for every byte of input state array
     generate
-        for(int i=0; i<16; i++) begin
+        for(i=0; i<16; i++) begin
             always_ff @(posedge gated_clk) begin
                 if(!rst_n) begin
                     masked_a_byte[(8*i) +: 8] <= 0;
+                    denominator[(8*i) +: 8] <= 0;
+                    masked_d_inv[(8*i) +: 8] <= 0;
+                    masks_of_A_inv[(16*i) +: 16] <= 0;
+                    invSubBytes[(8*i) +: 8] <= 0;
                 end
                 else begin
                     if(!enb_n) begin
                         case(fsm_state)
-                            INIT: begin
+                            ISB_INIT: begin  // this state doesn't handle any computation, it just handles handshake and accepting inputs
                                 masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
+                                denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
+                                masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
+                                masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                                invSubBytes[(8*i) +: 8] <= invSubBytes[(8*i) +: 8];
                             end
-                            INV_AFFINE_TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(invAffine(state[(8*i) +: 8]), {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]})
-                            default: 
+                            INV_AFFINE_TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(invAffine(state[(8*i) +: 8]), {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
+                            ISB_MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
+                            ISB_MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel) +: 4], rand_num[((28*i)+12+slice_sel) +: 4]});
+                            ISB_MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel) +: 4], rand_num[((28*i)+20+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
+                            INV_SUB_BYTES: invSubBytes[(8*i) +: 8] <= invBasis_masks_xor(masks_of_A_inv[(16*i) +: 16]);
+                            default: begin
+                                masked_a_byte[(8*i) +: 8] <= 0;
+                                denominator[(8*i) +: 8] <= 0;
+                                masked_d_inv[(8*i) +: 8] <= 0;
+                                masks_of_A_inv[(16*i) +: 16] <= 0;
+                                invSubBytes[(8*i) +: 8] <= 0;
+                            end 
                         endcase
                     end
                     else begin
                         masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
+                        denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
+                        masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
+                        masks_of_A_inv[(16*i) +: 16] <= masks_of_A_inv[(16*i) +: 16];
+                        invSubBytes[(8*i) +: 8] <= invSubBytes[(8*i) +: 8];
                     end
                 end
             end

@@ -7,6 +7,7 @@ LINT_DIR = ../lint
 SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
 TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
 TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
+COMPOSITE_MATH_PKG = $(RTL_DIR)/composite_field_math.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
 export PYTHONDONTWRITEBYTECODE := 1  # Prevent __pycache__ creation in source directories 
@@ -59,8 +60,13 @@ $(TRNG_PARAM_FILE): $(SIM_DIR)/gen_param.py
 GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top
 
 # RTL sources
+# composite_field_math_pkg is a foundational package (imports only type_defs_pkg)
+# used by sbox.sv and invSbox.sv, and transitively by every block that embeds an
+# S-Box (sbox_top, addRoundKey(_top), cipher(_top)). It is listed in the base
+# sources -- right after the typedef package it depends on -- so any block that
+# imports it elaborates; blocks that don't just compile an unused package.
 BLOCK_DEPS =
-VERILOG_SOURCES = $(TYPEDEF_PKG) $(RTL_DIR)/icg.sv
+VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 
 ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
