@@ -1,3 +1,9 @@
+/**
+ * This Inverse SBox utilizes same composite field math as SBox and align them as per inverse SBox algorithm
+ * TRNG and inverse SBox have same handshake as SBox and this block consumes 1344 random bits from TRNG and 
+   consumption is similar to SBox when it operates in matrix mode
+**/
+
 import type_defs_pkg::*;
 import composite_field_math_pkg::*;
 

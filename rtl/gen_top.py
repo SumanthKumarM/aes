@@ -10,7 +10,7 @@ git. The Makefile invokes this script with a block name before compiling for
 and only ever see the real design files.
 
 Usage: python3 gen_top.py <block>
-  where <block> is one of: sbox_top, addRoundKey_top, cipher_top
+  where <block> is one of: sbox_top, addRoundKey_top, cipher_top, invSbox_top
 """
 import sys
 from pathlib import Path
@@ -167,6 +167,57 @@ module addRoundKey_top (
 endmodule
 """
 
+INVSBOX_TOP = """\
+import type_defs_pkg::*;
+
+module invSbox_top(
+    // invSbox output (invSubBytes result)
+    output logic [127:0] invSubBytes,  // 4x4 state matrix (16 bytes total)
+    output logic invSbox_ready,  // invSbox ready for next input
+    output logic trng_dead_flag,  // TRNG has encountered fatal error
+    output logic invSbox_done_pulse,  // single clock cycle pulse when Sbox has computed SubBytes
+    output logic rst_trng,  // S-box can reset TRNG if needed
+    input logic clk,  // Main clock
+    input logic invSbox_enb_n,  // SBox enable signal
+    input logic sampling_clk,  // High-frequency clock for noise source
+    input logic ext_rst_n,  // External reset (active low)
+    input logic raw_rand_bit,  // Raw random bit from noise source (py model)
+    input logic proceed,  // testbench acknowledges sbox_done_pulse so Sbox can advance past SUB_BYTES
+    input logic [127:0] invSbox_input);  // 128-bit plaintext
+
+    // TRNG to S-box connections
+    logic [1679:0] rand_num;  // random data from TRNG
+    logic trng_key_valid;  // TRNG: data is valid
+    logic trng_rst;  // combined reset driven into TRNG
+
+    assign trng_rst = ext_rst_n & !rst_trng;
+
+    trng TRNG(
+        .rand_word(rand_num),
+        .trng_key_valid(trng_key_valid),
+        .dead_flag(trng_dead_flag),
+        .sbox_ready(invSbox_ready),
+        .raw_rand_bit(raw_rand_bit),
+        .sampling_clk(sampling_clk),
+        .clk(clk),
+        .ext_rst_n(trng_rst));
+
+    invSbox InvSBox(
+        .invSubBytes(invSubBytes),
+        .invSbox_ready(invSbox_ready),
+        .invSbox_done_pulse(invSbox_done_pulse),
+        .rst_trng(rst_trng),
+        .trng_dead_flag(trng_dead_flag),
+        .state(invSbox_input),
+        .rand_num(rand_num[1343:0]),
+        .trng_key_valid(trng_key_valid),
+        .proceed(proceed),
+        .enb_n(invSbox_enb_n),
+        .rst_n(ext_rst_n),
+        .clk(clk));
+endmodule
+"""
+
 CIPHER_TOP = """\
 import type_defs_pkg::*;
 
@@ -279,6 +330,7 @@ TEMPLATES = {
     "sbox_top": SBOX_TOP,
     "addRoundKey_top": ADDROUNDKEY_TOP,
     "cipher_top": CIPHER_TOP,
+    "invSbox_top": INVSBOX_TOP,
 }
 
 

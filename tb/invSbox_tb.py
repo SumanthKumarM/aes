@@ -24,17 +24,18 @@ port list. When you build the wrapper, match these names (or edit the
         input  logic         proceed,            // TB acks invSbox_done_pulse
         input  logic [127:0] invSbox_input);     // 128-bit ciphertext-side input
 
-The internal invSbox instance is assumed to be named `InvSbox` (mirrors `Sbox`
-in sbox_top), so its FSM is probed at `dut.InvSbox.fsm_state`. FSM probing is
-wrapped in try/except, so a different instance name only disables the state
-monitor -- it does not fail the tests.
+The internal invSbox instance is named `InvSBox` (per rtl/invSbox_top.sv), so
+its FSM is probed at `dut.InvSBox.fsm_state`. FSM probing is wrapped in
+try/except, so a different instance name only disables the state monitor --
+it does not fail the tests.
 
 NOTE on rand width: invSbox declares `rand_num[1343:0]` (1344 bits = 28*16*3,
-i.e. one TRNG batch feeds 3 InvSubBytes computations via invSbox_cntr 0->1->2).
-trng.sv currently emits rand_word[1679:0]. Reconciling that width is exactly
-the trng.sv change you mentioned; it is internal to the wrapper and does not
-affect this TB (the TB never drives rand_num directly -- it feeds entropy bits
-through the noise model, identical to sbox_tb.py).
+i.e. one TRNG batch feeds 3 InvSubBytes computations via invSbox_cntr 0->1->2),
+while trng.sv emits rand_word[1679:0]. invSbox_top.sv reconciles this by
+slicing `.rand_num(rand_num[1343:0])` at the instantiation -- the upper 336
+bits of each TRNG batch go unused. This is internal to the wrapper and does
+not affect this TB (the TB never drives rand_num directly -- it feeds entropy
+bits through the noise model, identical to sbox_tb.py).
 
 VERIFICATION MODEL
 ------------------
@@ -179,7 +180,7 @@ def read_output(dut):
 def get_fsm(dut):
     """Best-effort FSM read; returns None if the instance name doesn't match."""
     try:
-        return int(dut.InvSbox.fsm_state.value)
+        return int(dut.InvSBox.fsm_state.value)
     except Exception:
         return None
 
