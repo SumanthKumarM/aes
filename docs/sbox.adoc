@@ -191,7 +191,7 @@ P₁ = a₁ₘ·a₀ₘ ⊕ R₃
 P₂ = a₁ₘ·a₀ᵣ ⊕ a₁ᵣ·a₀ₘ ⊕ a₁ᵣ·a₀ᵣ ⊕ R₃
 ----
 
-Verification: `P₁ ⊕ P₂ = a₁·a₀` ✓
+Verification: `P₁ ⊕ P₂ = a₁·a₀`
 
 === Assembling D₁ and D₂
 
@@ -216,7 +216,7 @@ D₁⁴ , D₂⁴     →  shares of D⁴    (no R needed)
 D₁⁸ , D₂⁸     →  shares of D⁸    (no R needed)
 ----
 
-Verification: `D₁² ⊕ D₂² = (D₁ ⊕ D₂)² = D²` (linearity of squaring in GF(2⁴)) ✓
+Verification: `D₁² ⊕ D₂² = (D₁ ⊕ D₂)² = D²` (linearity of squaring in GF(2⁴))
 
 === First Masked Multiply — D⁸ · D⁴ using R₄
 
@@ -359,7 +359,7 @@ All 256 possible input values are verified to produce identical outputs to the s
 
 === Overview
 
-This implementation employs a *6-state Finite State Machine (FSM)* to decompose the composite field inversion operations into distinct pipelined stages, rather than consolidating all computations into fewer deeper combinational blocks. This architectural approach is justified by comprehensive Static Timing Analysis (STA) conducted on a Xilinx Artix-7 FPGA (xc7a35tcsg324-1) platform. This section documents the empirical timing evidence supporting this design decision, including critical path analysis, throughput characterization, and architectural alternatives evaluation.
+The composite field inversion is decomposed across a 6-state FSM rather than consolidated into fewer, deeper combinational blocks. This section walks through the Static Timing Analysis (STA) that justifies that split, based on synthesis for a Xilinx Artix-7 FPGA (xc7a35tcsg324-1).
 
 === Timing Analysis Results
 
@@ -380,7 +380,7 @@ Synthesis at the block level (sbox module in isolation) with Vivado 2025.2 yield
 | Timing Violations | 0
 |===
 
-All timing constraints are satisfied with adequate margin. The design synthesizes without violations across process corners (Slow/Fast) and temperature ranges, confirming robustness to manufacturing and operational variation.
+All constraints are met with margin, and the design holds across process corners (slow/fast) and temperature ranges.
 
 === Critical Path Composition
 
@@ -392,23 +392,21 @@ The worst-case timing path identified in the synthesized design exhibits the fol
 
 The critical path traverses: FSM counter output → slice selection logic → random number slicing → GF(2^4) multiplication chains → A-inverse reconstruction → destination register input.
 
-This path represents a representative worst-case scenario among the 2,065 analyzed endpoints, exemplifying the timing characteristics of the inner composite field inversion loop across parallel byte instances.
+This path is representative of the worst case across the 16 parallel byte instances, out of 2,065 endpoints analyzed in total.
 
 === Routing Delay Dominance (78.4% of Critical Path)
 
-A critical observation emerges from the timing analysis: **routing delay (interconnect) constitutes 78.4% of the 8.905 ns critical path**, with combinational logic delay accounting for only 21.6%.
+Routing (interconnect) delay accounts for 78.4% of the 8.905 ns critical path; combinational logic accounts for the remaining 21.6%. Three factors drive this:
 
-This distribution is attributable to fundamental FPGA architectural factors:
+. *Global control signal distribution.* The FSM counter's slice-select signal (`slice_sel[8]`) fans out to all 16 parallel byte blocks — a net with fan-out of 130. That single interconnect segment costs 1.008 ns, over 10% of the clock budget on its own.
 
-. *Global Control Signal Distribution:* The FSM counter slice selector signal (slice_sel[8]) must propagate to all 16 parallel byte processing blocks, resulting in a net with fan-out of 130. This single interconnect segment incurs 1.008 ns of delay, representing over 10% of the total clock budget.
+. *Spatially distributed datapath.* The masked composite field inversion coordinates several GF(2^4) multiplications, squarings, and bit recombinations. Place-and-route spreads these across the device to manage congestion and heat, which lengthens the interconnect between them.
 
-. *Spatially Distributed Datapath:* The masked composite field inversion algorithm requires coordination among multiple GF(2^4) multiplications, polynomial squarings, and bit recombination operations. The FPGA place-and-route tool distributes these operations across the device to manage routing congestion and dissipate heat, necessarily increasing interconnect distances.
-
-. *Inherent FPGA Interconnect Characteristics:* Modern FPGA design tools, despite sophisticated placement algorithms, cannot arbitrarily reduce interconnect delays. Routing delays on a 35K-LUT device (such as the Artix-7 xc7a35t) typically range from 0.5–2 ns per routing segment. This is a physical constant, independent of logic-level algorithmic optimization.
+. *FPGA interconnect limits.* Routing segments on a 35K-LUT device such as the Artix-7 xc7a35t typically cost 0.5–2 ns regardless of how the logic feeding them is structured. No amount of logic-level optimization changes this.
 
 === Why 6 States is Optimal, Not Excessive
 
-The FSM uses exactly 6 stages (plus INIT and RESET_TRNG) to pipeline the composite inversion. The key computation stages are:
+The FSM pipelines the composite inversion across 6 stages, plus INIT and RESET_TRNG:
 
 [cols="1,2,3"]
 |===
@@ -427,37 +425,33 @@ Each computation stage evaluates one of the masked functions from the `sbox_func
 
 === Analysis: Impact of Alternative FSM Configurations
 
-A key design consideration is whether reducing the FSM state count to 3 or 4 states by merging multiple functions would improve overall performance. Static timing analysis demonstrates that such restructuring would be detrimental:
+A natural question is whether merging states down to 3 or 4 would improve overall performance. Working through the timing budget for two merge scenarios says no:
 
-**Scenario 1: Merging MASKED_D and MASKED_D_INV into a Single State**
+**Merging MASKED_D and MASKED_D_INV into one state**
 
-* Combined combinational depth: approximately 5–6 ns (sequential composition of two masked multiplication chains)
-* Routing delay: approximately 7–8 ns (unchanged; interconnect topology remains invariant to FSM structure)
-* Predicted total path delay: 12–14 ns
-* Required clock period: 13–15 ns, yielding 67–75 MHz operation (25–33% frequency reduction)
-* Resulting throughput: 16 bytes per 3 cycles at 75 MHz = 250 MB/s (versus 267 MB/s at 100 MHz with 6 states)
+* Combined logic depth: ~5–6 ns (two masked multiplication chains in sequence)
+* Routing delay: ~7–8 ns — unchanged, since interconnect topology doesn't depend on FSM structure
+* Total path delay: ~12–14 ns, forcing a 13–15 ns clock period (67–75 MHz, a 25–33% frequency drop)
+* Throughput: 16 bytes per 3 cycles at 75 MHz ≈ 250 MB/s, versus 267 MB/s today
 
-**Scenario 2: Merging All Stages into 2-State Configuration**
+**Collapsing everything into 2 states**
 
-* Combined combinational depth: approximately 10–12 ns (accumulation of all masked operations in sequence)
-* Routing delay: approximately 8–10 ns (place-and-route congestion increases, potentially extending wire delays)
-* Predicted total path delay: 18–22 ns
-* Required clock period: 22–25 ns, yielding 40–45 MHz operation (55–60% frequency reduction)
-* Resulting throughput: 16 bytes per 2 cycles at 40 MHz = 320 MB/s (offers no sustainable advantage given the power cost and area overhead)
+* Combined logic depth: ~10–12 ns (all masked operations back to back)
+* Routing delay: ~8–10 ns — place-and-route congestion tends to worsen further at this depth
+* Total path delay: ~18–22 ns, forcing a 22–25 ns clock period (40–45 MHz, a 55–60% drop)
+* Throughput: 16 bytes per 2 cycles at 40 MHz ≈ 320 MB/s — not worth the added power and area
 
-**Fundamental Constraint:** Routing delay (6.982 ns, or 78.4% of the critical path) is intrinsic to the physical architecture and cannot be reduced through FSM-level restructuring alone. Merging computational states increases combinational depth while routing delay remains invariant, resulting in degraded timing margins and reduced clock frequency. The pipelined 6-state decomposition effectively partitions logic to operate within the routing budget of each stage.
+Routing delay (6.982 ns, 78.4% of the critical path) is fixed by the physical layout, not by FSM structure. Merging states only stacks combinational depth on top of that fixed cost, so every merge scenario above trades frequency for a latency reduction that doesn't pay for itself. The 6-state split keeps each stage inside its routing budget instead.
 
 === Pipelining Benefits
 
-The 6-state pipeline architecture provides multiple strategic advantages:
+1. **Per-stage optimization.** Place-and-route can independently optimize each ~1.5 ns combinational block instead of fighting congestion in one large one.
 
-1. **Per-Stage Optimization:** Place-and-route tools can independently optimize each approximately 1.5 ns combinational block, reducing congestion and avoiding spatial clustering of logic that would worsen routing delays.
+2. **Throughput via overlap.** Bytes advance through the pipeline simultaneously — while byte N is in stage k, byte N-1 is already in stage k+1 — sustaining 2.67 bytes/cycle despite a 6-cycle latency per byte.
 
-2. **Throughput Parallelism:** Multiple input bytes advance through the pipeline simultaneously. While byte N executes in stage k, byte N-1 progresses through stage k+1. This sustains 2.67 bytes/cycle throughput despite 6-cycle latency per byte.
+3. **Timing margin.** The 0.977 ns setup slack absorbs process, temperature, and supply variation that a tighter design would eat into.
 
-3. **Timing Margin:** The 0.977 ns setup slack absorbs corner-case variation (process, temperature, supply voltage). Tighter designs would approach or violate timing constraints under adverse conditions.
-
-4. **Device Portability:** The pipeline architecture transfers to other FPGA families (Kintex-7, Virtex-7) with minimal structural changes. Fewer-state variants would require iteration and re-characterization for each platform.
+4. **Portability.** The same structure carries over to other FPGA families (Kintex-7, Virtex-7) with minimal rework; fewer-state variants would need re-characterization per platform.
 
 === Throughput Analysis
 
@@ -471,44 +465,21 @@ The 6-state pipeline architecture provides multiple strategic advantages:
 | 2-state variant | 2 | 50 | 8.0 | 200
 |===
 
-The tradeoff between state reduction and frequency loss is evident. Reducing FSM states decreases latency but forces deeper combinational logic blocks, which reduces achievable clock frequency. The 6-state design achieves superior throughput compared to alternatives when realistic FPGA timing constraints are considered.
+Fewer states cut per-byte latency but push more logic into each remaining stage, capping the achievable clock. Once that routing-driven frequency ceiling is accounted for, the 6-state design comes out ahead on sustained throughput.
 
 === System-Level Timing Consideration
 
-The foregoing analysis evaluates the SBox module in isolation. However, block-level timing closure does not necessarily imply system-level timing satisfaction.
+The analysis above evaluates the SBox in isolation; block-level closure does not guarantee system-level closure. A full picture requires synthesizing the complete `cipher_top` integration — 16 parallel SBox instances, the ShiftRows permutation, the MixColumns transform, and AddRoundKey (which also uses the forward SBox for key expansion). The cipher-level critical path could just as easily land in MixColumns' polynomial multiplications, in AddRoundKey's XOR tree, or in the interconnect between blocks. If it does, further SBox-level optimization buys nothing at the system level.
 
-A comprehensive design evaluation requires synthesizing the complete `cipher_top` integration, which comprises:
-* 16 parallel SBox instances
-* ShiftRows permutation layer
-* MixColumns polynomial transformation
-* AddRoundKey operation (which employs the forward SBox for key schedule computation)
-
-The system-level critical path may not reside within the SBox itself; it could instead manifest in MixColumns polynomial multiplications, AddRoundKey XOR operations, or interconnect between blocks. If the cipher-level critical path is determined to reside outside the SBox, further optimization of SBox timing alone would provide no measurable performance improvement.
-
-**Recommendation:** Complete system-level timing characterization is necessary before pursuing additional SBox optimization efforts. The current 6-state design provides adequate margin at the block level; system-level constraints may impose tighter bounds that necessitate a different optimization strategy.
+**Recommendation:** hold off on further SBox optimization until `cipher_top` has been synthesized and characterized as a whole. The current design has adequate margin in isolation, but the system-level bound may sit elsewhere.
 
 === Power and Area Considerations
 
-The 0.977 ns slack margin provides opportunity for timing-constraint relaxation to achieve power reduction objectives:
-
-* Relaxing the clock period to 12–15 ns (corresponding to 67–83 MHz operation) would reduce dynamic power dissipation according to P ∝ f·V^2 relationship. For a 25% frequency reduction, dynamic power scales approximately as (0.75)^2 ≈ 0.56, or 44% reduction.
-* The 6-state pipeline architecture maintains operational efficiency at these reduced frequencies, sustaining 177–223 MB/s throughput while consuming significantly less power.
-* This constitutes a valuable tradeoff for battery-constrained, thermally-limited, or low-power consumption scenarios where maximum frequency is not a requirement.
+The 0.977 ns slack leaves room to trade frequency for power where that tradeoff is wanted. Relaxing the clock to 12–15 ns (67–83 MHz) cuts dynamic power roughly as `(f_new/f_old)^2` — a 25% frequency reduction scales power by about 0.56, a 44% saving — while the pipeline still sustains 177–223 MB/s. That's a reasonable option for battery-constrained or thermally limited deployments where 100 MHz isn't required.
 
 === Conclusion
 
-The 6-state FSM design is supported by comprehensive timing analysis. Key findings are:
-
-. Achieves 100 MHz operation with 0.977 ns setup margin, adequate for process and temperature corner cases
-. Routing delays (78.4% of critical path) are architecture-invariant; FSM state reduction provides no proportional improvement
-. Pipelined decomposition enables placement and routing tools to optimize each stage independently, reducing congestion-induced timing penalties
-. Delivers maximum throughput (267 MB/s) relative to frequency headroom and area utilization
-. Demonstrates portability across FPGA device families (Artix-7, Kintex-7, Virtex-7) without significant restructuring
-. Provides adequate margin for robustness under temperature, voltage, and process variation
-
-Alternative configurations (fewer states, deeper combinational logic) would necessarily result in frequency reduction without proportional throughput improvement. Merging states increases combinational depth and routing congestion without reducing the architecture-invariant interconnect delays that dominate the critical path.
-
-The 6-state pipeline architecture achieves an optimal balance among latency, achievable clock frequency, sustained throughput, area efficiency, and portability to contemporary FPGA platforms.
+The 6-state pipeline holds 100 MHz with 0.977 ns of setup margin — enough to absorb process, voltage, and temperature variation. Because routing delay (78.4% of the critical path) is set by the physical layout rather than by FSM structure, splitting the inversion into more stages lets place-and-route optimize each one independently instead of fighting a single deep block, which is what keeps throughput at 267 MB/s. Merging states, by contrast, only adds logic depth on top of a routing cost that doesn't go away — a net loss in every scenario modeled above.
 
 == References
 
