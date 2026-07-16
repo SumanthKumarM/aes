@@ -1,4 +1,4 @@
-import type_defs_pkg::*;
+import type_defs_pkg::state_matrix_t;
 
 module shiftRows(
     output state_matrix_t shift_rows,
