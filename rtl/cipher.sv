@@ -79,6 +79,7 @@ module cipher(
         if(!rst_n) begin
             round_cntr <= 0;
             sbox_enb_n <= 2'b11;
+            sbox_proceed <= 0;
             ark_enb_n <= 1;
             cipher_done <= 0;
             fsm_state <= PRE_ADDROUNDKEY;
