@@ -47,7 +47,7 @@ module cipher(
         //   KEY size = 11 (AES-256): Nr = 14
         Nr = {(key_size[1] | key_size[0]), key_size[1], key_size[0], 1'b0};
 
-        // rerouting subBytes to subBytes_matrix as both of them in different formats
+        // rerouting subBytes to subBytes_matrix as both of them are in different formats
         for(int i=0; i<16; i++)
             subBytes_matrix[i%4][i/4] = subBytes[((8*(i%4))+(32*(i/4))) +: 8];
     end

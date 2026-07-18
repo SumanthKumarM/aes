@@ -10,7 +10,8 @@ git. The Makefile invokes this script with a block name before compiling for
 and only ever see the real design files.
 
 Usage: python3 gen_top.py <block>
-  where <block> is one of: sbox_top, addRoundKey_top, cipher_top, invSbox_top
+  where <block> is one of: sbox_top, addRoundKey_top, cipher_top, invSbox_top,
+  invCipher_top
 """
 import sys
 from pathlib import Path
@@ -326,11 +327,132 @@ module cipher_top(
 endmodule
 """
 
+INVCIPHER_TOP = """\
+import type_defs_pkg::*;
+
+module invCipher_top(
+    output state_matrix_t invCipher_state,  // state matrix that has gone through whole invCIPHER algorithm
+    output logic invCipher_done,  // becomes high when invCIPHER is done computing transformed state
+    output logic internal_state,  // internal state of invCipher
+    output logic [1679:0] rand_num,  // random data from TRNG
+    output logic invSbox_ready,  // tells TRNG that invSbox is ready to accept random bits
+    output logic trng_key_valid,  // TRNG: data is valid
+    output logic trng_dead_flag,  // TRNG has encountered fatal error
+    input state_matrix_t state,  // input state matrix (encrypted text)
+    input u256_t master_key,  // input master KEY
+    input logic [1:0] key_size,  // AES KEY size to decide number of rounds
+    input logic raw_rand_bit,  // raw random bit from noise source
+    input logic enb_n,  // active low enable signal for invCipher
+    input logic rst_n, sampling_clk, clk);
+
+    // invCipher <-> addRoundKey connections
+    state_matrix_t ark_state_in;  // input state to AddRoundKey from invSbox
+    state_matrix_t addRoundKeyOut;  // output of addRoundKey back to invCipher
+    unibble ark_round_num;  // invCIPHER round number (already mapped 0..Nr) to AddRoundKey
+    logic ark_enb_n;  // enable signal to AddRoundKey
+    logic ark_done;  // asserted when AddRoundKey has computed the output
+
+    // addRoundKey <-> word-mode Sbox connections (KeyExpansion path)
+    logic [1:0] sbox_enb_n;  // enable signal to SBox from AddRoundKey
+    logic sbox_ready;  // unused in word mode (no TRNG handshake), observed only
+    logic sbox_done_pulse;  // Sbox has computed the requested subBytes word
+    logic sbox_proceed;  // acknowledges sbox_done_pulse so Sbox can advance
+    word_t ark_sbox_state;  // rotated version of generated KEY sent to SBox
+
+    // width adapters: the sbox state/subBytes ports are 128-bit, but the
+    // KeyExpansion path only ever uses the low 32 bits (word mode)
+    logic [127:0] sbox_state_ext;  // zero-extended sbox input word
+    logic [127:0] subBytes_full;  // full-width sbox output; only [31:0] is meaningful here
+    word_t subByte;  // low word of the sbox output, consumed by addRoundKey
+
+    // TRNG sharing: the 1680-bit packet is split so the word-mode Sbox and the
+    // state-mode invSbox each see their own randomness slices
+    logic [1679:0] sbox_rand_num;
+    logic [1343:0] invSbox_rand_num;
+    logic sbox_rst_trng, invSbox_rst_trng;  // per-consumer TRNG reset demands
+    logic trng_rst;  // combined reset driven into TRNG
+
+    // word-mode slice offsets in sbox.sv are 448/1008/1568, so the 112-bit
+    // chunks must sit at those exact bit positions (448 zero bits in between)
+    assign sbox_rand_num = {rand_num[1679:1568], 448'd0, rand_num[1119:1008], 448'd0, rand_num[559:448], 448'd0};
+    assign invSbox_rand_num = {rand_num[1567:1120], rand_num[1007:560], rand_num[447:0]};
+    assign trng_rst = rst_n & sbox_rst_trng & invSbox_rst_trng;
+
+    assign sbox_state_ext = {96'd0, ark_sbox_state};
+    assign subByte = subBytes_full[31:0];
+    assign sbox_proceed = ark_done;
+
+    trng TRNG(
+        .rand_word(rand_num),
+        .trng_key_valid(trng_key_valid),
+        .dead_flag(trng_dead_flag),
+        .sbox_ready(invSbox_ready),
+        .raw_rand_bit(raw_rand_bit),
+        .sampling_clk(sampling_clk),
+        .clk(clk),
+        .ext_rst_n(trng_rst));
+
+    // Word-mode Sbox for the KeyExpansion path (same wiring as addRoundKey_top).
+    // trng_key_valid is tied low: in word mode all required random bits are
+    // presented up front on sbox_rand_num, so no TRNG handshake is needed.
+    sbox SBox(
+        .subBytes(subBytes_full),
+        .sbox_ready(sbox_ready),
+        .sbox_done_pulse(sbox_done_pulse),
+        .rst_trng(sbox_rst_trng),
+        .trng_dead_flag(trng_dead_flag),
+        .state(sbox_state_ext),
+        .rand_num(sbox_rand_num),
+        .trng_key_valid(1'b0),
+        .proceed(sbox_proceed),
+        .enb_n(sbox_enb_n[1]),
+        ._enb_n(sbox_enb_n[0]),
+        .rst_n(rst_n),
+        .clk(clk));
+
+    addRoundKey AddRoundKey(
+        .addRoundKeyOut(addRoundKeyOut),
+        .ark_done(ark_done),
+        .sbox_state(ark_sbox_state),
+        .sbox_enb_n(sbox_enb_n),
+        .state(ark_state_in),
+        .master_key(master_key),
+        .subByte(subByte),
+        .round_num(ark_round_num),
+        .key_size(key_size),
+        .sbox_done(sbox_done_pulse),
+        .enb_n(ark_enb_n),
+        .rst_n(rst_n),
+        .clk(clk));
+
+    invCipher InvCipher(
+        .invCipher_state(invCipher_state),
+        .invCipher_done(invCipher_done),
+        .internal_state(internal_state),
+        .ark_state_in(ark_state_in),
+        .ark_enb_n(ark_enb_n),
+        .ark_round_num(ark_round_num),
+        .invSbox_ready(invSbox_ready),
+        .rst_trng(invSbox_rst_trng),
+        .state(state),
+        .rand_num(invSbox_rand_num),
+        .ark_state_out(addRoundKeyOut),
+        .ark_done(ark_done),
+        .key_size(key_size),
+        .trng_key_valid(trng_key_valid),
+        .trng_dead_flag(trng_dead_flag),
+        .enb_n(enb_n),
+        .rst_n(rst_n),
+        .clk(clk));
+endmodule
+"""
+
 TEMPLATES = {
     "sbox_top": SBOX_TOP,
     "addRoundKey_top": ADDROUNDKEY_TOP,
     "cipher_top": CIPHER_TOP,
     "invSbox_top": INVSBOX_TOP,
+    "invCipher_top": INVCIPHER_TOP,
 }
 
 
