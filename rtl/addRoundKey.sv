@@ -99,7 +99,7 @@ module addRoundKey(
         else begin  // actual KeyExpansion starts from round=1
             case(key_size)
                 2'b01: begin  // AES-128
-                    sbox_enb_n = 2'b10;  // enabling Sbox since special transformation requires subByte
+                    sbox_enb_n = (!enb_n) ? 2'b10 : 2'b11;  // enabling Sbox when AddRoundKey is enabled since special transformation requires subByte
                     sbox_state = rotWord({prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]});  // loading Sbox input
 
                     for(int i=0; i<4; i++) begin 
@@ -122,7 +122,7 @@ module addRoundKey(
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = 32'h0000_0000;
                     end
                     else begin
-                        sbox_enb_n = 2'b10;  // enabling Sbox since special transformation requires subByte
+                        sbox_enb_n = (!enb_n) ? 2'b10 : 2'b11;  // enabling Sbox when AddRoundKey is enabled since special transformation requires subByte
                         sbox_state = rotWord({prev_expKey[3][5], prev_expKey[2][5], prev_expKey[1][5], prev_expKey[0][5]});  // loading Sbox input
                         
                         for(int i=0; i<6; i++) begin
@@ -146,7 +146,7 @@ module addRoundKey(
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = 32'h0000_0000;
                     end
                     else begin
-                        sbox_enb_n = 2'b10;  // enabling Sbox since it's required to compute subByte
+                        sbox_enb_n = (!enb_n) ? 2'b10 : 2'b11;  // enabling Sbox when AddRoundKey is enabled since it's required to compute subByte
 
                         if(round_num[0] == 0) begin  // even rounds require first 4 KEY words
                             sbox_state = rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]});  // loading Sbox input
