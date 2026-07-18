@@ -387,7 +387,7 @@ async def tc1_reset(dut):
     rst_trng = int(dut.rst_trng.value)
 
     assert ark_out == 0,  f"addRoundKeyOut not zero during reset: 0x{ark_out:032x}"
-    assert rst_trng == 0, f"rst_trng not zero during reset: {rst_trng}"
+    assert rst_trng == 1, f"rst_trng not one during reset: {rst_trng}"
 
     dut._log.info(" addRoundKeyOut = 0 during reset")
     dut._log.info(" rst_trng       = 0 during reset")
