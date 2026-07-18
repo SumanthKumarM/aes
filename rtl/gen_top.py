@@ -57,7 +57,7 @@ module sbox_top(
     logic trng_key_valid;  // TRNG: data is valid
     logic trng_rst;  // combined reset driven into TRNG
 
-    assign trng_rst = ext_rst_n & !rst_trng;
+    assign trng_rst = ext_rst_n & rst_trng;
 
     trng TRNG(
         .rand_word(rand_num),
@@ -121,7 +121,7 @@ module addRoundKey_top (
     logic [127:0] sbox_state_ext;  // zero-extended sbox input word
     logic [127:0] subBytes_full;  // full-width sbox output; only [31:0] is meaningful here
 
-    assign trng_rst = rst_n & !rst_trng;
+    assign trng_rst = rst_n & rst_trng;
     assign sbox_state_ext = {96'd0, sbox_state};
     assign subByte = subBytes_full[31:0];
     assign sbox_proceed = ark_done;
@@ -187,7 +187,7 @@ module cipher_top(
     logic rst_trng;  // resets TRNG when health test results in fatal failures
     logic trng_rst;  // combined reset driven into TRNG
 
-    assign trng_rst = rst_n & !rst_trng;
+    assign trng_rst = rst_n & rst_trng;
 
     trng TRNG(
         .rand_word(rand_num),
