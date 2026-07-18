@@ -1,6 +1,6 @@
 /**
  * This is the CIPHER block which instantiates Sbox, ShiftRows, MixColumns and AddRoundKey as sub-modules where input plain-text undergoes all these transformations
- * This block receives a total of 1680 random bits from TRNG and distributes them to Sbox and AddRoundKey which internally has another Sbox
+ * This block receives a total of 1680 random bits from TRNG which goes to Sbox internally
  * CIPHER has no direct handshake with TRNG but governs TRNG - SBox local handshake. Handshake between TRNG and SBox only happens when CIPHER enables Sbox
 **/
 

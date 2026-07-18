@@ -258,9 +258,9 @@ module sbox(
     u128_t masked_d_inv;  // stores inverse of denominator of every state element
     u256_t masks_of_A_inv;  // stores every element of state array in tower field inversion form
     u256_t masks_of_b_inv;  // stores inverse of every elemnt of state array
-    logic [1:0] sbox_cntr;  // keeps track of how many times Sbox has computed subBytes
+    logic [16:0][1:0] sbox_cntr;  // keeps track of how many times Sbox has computed subBytes
     logic sbox_done, sbox_done_d;  // these are registered done signals which stay high more than 1 cycle
-    logic [10:0] slice_sel;  // required to select particular slice of rand_num
+    logic [15:0][10:0] slice_sel;  // required to select particular slice of rand_num
     sbox_states fsm_state;
     genvar i;
 
@@ -274,7 +274,7 @@ module sbox(
             rst_trng <= 0;
             sbox_done <= 0;
             sbox_done_d <= 0;
-            sbox_cntr <= 0;
+            sbox_cntr[0] <= 0;
             fsm_state <= INIT;
         end
         else begin
@@ -282,7 +282,7 @@ module sbox(
                 case(fsm_state)
                     INIT: begin  // this state handles the handshake and accepting SBox inputs
                         // s-box is ready to accept random bits only when all random bits are consumed and this signal functions only when enb_n = 0 else it freezes
-                        sbox_ready <= (enb_n && !_enb_n) ? 0 : ((sbox_cntr == 0) ? 1 : 0);
+                        sbox_ready <= (enb_n && !_enb_n) ? 0 : ((sbox_cntr[0] == 0) ? 1 : 0);
                         rst_trng <= 0;
                         sbox_done <= 0;
 
@@ -292,7 +292,7 @@ module sbox(
                             else begin  // when whole SBox is enabled
                                 // fsm waits for both signals so TRNG updating random bits and SBox transitioning to next happen stay in sync
                                 // which lets TOWER_FIELD state get actual new batch of random bits from TRNG 
-                                if(sbox_cntr == 0) fsm_state <= (trng_key_valid && sbox_ready) ? TOWER_FIELD : INIT;
+                                if(sbox_cntr[0] == 0) fsm_state <= (trng_key_valid && sbox_ready) ? TOWER_FIELD : INIT;
                                 else fsm_state <= TOWER_FIELD;
                             end
                         end
@@ -332,8 +332,8 @@ module sbox(
                         rst_trng <= 0;
 
                         // updating since Sbox has computed subBytes only when enb_n is low
-                        if(enb_n && !_enb_n) sbox_cntr <= sbox_cntr;
-                        else sbox_cntr <= (!proceed) ? sbox_cntr : ((sbox_cntr == 2) ? 0 : sbox_cntr + 1);
+                        if(enb_n && !_enb_n) sbox_cntr[0] <= sbox_cntr[0];
+                        else sbox_cntr[0] <= (!proceed) ? sbox_cntr[0] : ((sbox_cntr[0] == 2) ? 0 : sbox_cntr[0] + 1);
 
                         sbox_done <= 1;  // asserting this signal to signify that subBytes have been computed
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : ((proceed) ? INIT : SUB_BYTES);  // Sbox will advance to next state only when CIPHER/AddRoundKey has aknowledged
@@ -342,7 +342,7 @@ module sbox(
                         rst_trng <= 1;  // resets TRNG as fatal failure has occurred
                         sbox_ready <= 0;
                         sbox_done <= 0;
-                        sbox_cntr <= 0;
+                        sbox_cntr[0] <= 0;
                         fsm_state <= INIT;
                     end
                 endcase
@@ -351,7 +351,7 @@ module sbox(
                 sbox_ready <= 0;
                 rst_trng <= 0;  // as Sbox is disabled, it's not going to drive TRNG's reset
                 sbox_done <= 0;  // as Sbox is in freeze state it's not going to assert done signal
-                sbox_cntr <= sbox_cntr;
+                sbox_cntr[0] <= sbox_cntr[0];
                 fsm_state <= fsm_state;  // state has been freezed or on hold
             end
 
@@ -360,14 +360,18 @@ module sbox(
     end
 
     // slice_sel helps to select required 448-bit/112-bit slice of rand_num 
-    always_comb begin
-        case(sbox_cntr)
-            2'b00: slice_sel = (!enb_n && _enb_n) ? 0 : ((enb_n && !_enb_n) ? 448 : 0);
-            2'b01: slice_sel = (!enb_n && _enb_n) ? 560 : ((enb_n && !_enb_n) ? 1008 : 0);
-            2'b10: slice_sel = (!enb_n && _enb_n) ? 1120 : ((enb_n && !_enb_n) ? 1568 : 0);
-            default: slice_sel = 0;
-        endcase
-    end
+    generate
+        for(i=0; i<16; i++) begin
+            always_comb begin
+                case(sbox_cntr[i+1])
+                    2'b00: slice_sel[i] = (!enb_n && _enb_n) ? 0 : ((enb_n && !_enb_n) ? 448 : 0);
+                    2'b01: slice_sel[i] = (!enb_n && _enb_n) ? 560 : ((enb_n && !_enb_n) ? 1008 : 0);
+                    2'b10: slice_sel[i] = (!enb_n && _enb_n) ? 1120 : ((enb_n && !_enb_n) ? 1568 : 0);
+                    default: slice_sel[i] = 0;
+                endcase
+            end
+        end
+    endgenerate
 
     assign sbox_done_pulse = sbox_done && !sbox_done_d;  // generating a pulse of 1 clock cycle when Sbox has computed subBytes
 
@@ -396,13 +400,19 @@ module sbox(
                                 masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                                 subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
                             end
-                            TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
-                            MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
-                            MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel) +: 4], rand_num[((28*i)+12+slice_sel) +: 4]});
-                            MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel) +: 4], rand_num[((28*i)+20+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
+                            TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
+                            MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel[i]) +: 4], rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
+                            MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel[i]) +: 4], rand_num[((28*i)+12+slice_sel[i]) +: 4]});
+                            MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel[i]) +: 4], rand_num[((28*i)+20+slice_sel[i]) +: 4], rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
                             MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
-                            SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
+                            SUB_BYTES: begin
+                                // every bute has it's local sbox_cntr so a large fan out can be avoid which might improve timing performance
+                                if(enb_n && !_enb_n) sbox_cntr[i+1] <= sbox_cntr[i+1];
+                                else sbox_cntr[i+1] <= (!proceed) ? sbox_cntr[i+1] : ((sbox_cntr[i+1] == 2) ? 0 : sbox_cntr[i+1] + 1);
+                                subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
+                            end
                             default: begin
+                                sbox_cntr[i+1] <= 0;
                                 masked_a_byte[(8*i) +: 8] <= 0;
                                 denominator[(8*i) +: 8] <= 0;
                                 masked_d_inv[(8*i) +: 8] <= 0;
@@ -413,6 +423,7 @@ module sbox(
                         endcase
                     end
                     else begin  // as Sbox is disabled it will freeze it's state or stays on hold
+                        sbox_cntr[i+1] <= sbox_cntr[i+1];
                         masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                         denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                         masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
@@ -447,13 +458,17 @@ module sbox(
                                 masks_of_b_inv[(16*i) +: 16] <= masks_of_b_inv[(16*i) +: 16];
                                 subBytes[(8*i) +: 8] <= subBytes[(8*i) +: 8];
                             end
-                            TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
-                            MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
-                            MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel) +: 4], rand_num[((28*i)+12+slice_sel) +: 4]});
-                            MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel) +: 4], rand_num[((28*i)+20+slice_sel) +: 4], rand_num[((28*i)+4+slice_sel) +: 4], rand_num[((28*i)+slice_sel) +: 4]});
+                            TOWER_FIELD: masked_a_byte[(8*i) +: 8] <= tower_field(state[(8*i) +: 8], {rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
+                            MASKED_D: denominator[(8*i) +: 8] <= masked_denominator(masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+8+slice_sel[i]) +: 4], rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
+                            MASKED_D_INV: masked_d_inv[(8*i) +: 8] <= masked_d_inverse(denominator[(8*i) +: 8], {rand_num[((28*i)+16+slice_sel[i]) +: 4], rand_num[((28*i)+12+slice_sel[i]) +: 4]});
+                            MASKED_A_INV: masks_of_A_inv[(16*i) +: 16] <= masked_A_inverse(masked_d_inv[(8*i) +: 8], masked_a_byte[(8*i) +: 8], {rand_num[((28*i)+24+slice_sel[i]) +: 4], rand_num[((28*i)+20+slice_sel[i]) +: 4], rand_num[((28*i)+4+slice_sel[i]) +: 4], rand_num[((28*i)+slice_sel[i]) +: 4]});
                             MASKED_B_INV: masks_of_b_inv[(16*i) +: 16] <= masked_b_inverse(masks_of_A_inv[(16*i) +: 16]);
-                            SUB_BYTES: subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
+                            SUB_BYTES: begin
+                                sbox_cntr[i+1] <= (!proceed) ? sbox_cntr[i+1] : ((sbox_cntr[i+1] == 2) ? 0 : sbox_cntr[i+1] + 1);
+                                subBytes[(8*i) +: 8] <= affine_transformation(masks_of_b_inv[(16*i) +: 16]);
+                            end
                             default: begin
+                                sbox_cntr[i+1] <= 0;
                                 masked_a_byte[(8*i) +: 8] <= 0;
                                 denominator[(8*i) +: 8] <= 0;
                                 masked_d_inv[(8*i) +: 8] <= 0;
@@ -464,6 +479,7 @@ module sbox(
                         endcase
                     end
                     else begin  // as Sbox is disabled it will freeze it's state or stays on hold
+                        sbox_cntr[i+1] <= sbox_cntr[i+1];
                         masked_a_byte[(8*i) +: 8] <= masked_a_byte[(8*i) +: 8];
                         denominator[(8*i) +: 8] <= denominator[(8*i) +: 8];
                         masked_d_inv[(8*i) +: 8] <= masked_d_inv[(8*i) +: 8];
