@@ -438,6 +438,7 @@ module sbox(
         for(i=4; i<16; i++) begin  // this portion is only functional when SBox is supposed to operate on state matrix
             always_ff@(posedge gated_clk) begin
                 if(!rst_n) begin
+                    sbox_cntr[i+1] <= 0;
                     masked_a_byte[(8*i) +: 8] <= 0;
                     denominator[(8*i) +: 8] <= 0;
                     masked_d_inv[(8*i) +: 8] <= 0;
