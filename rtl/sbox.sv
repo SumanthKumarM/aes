@@ -271,7 +271,7 @@ module sbox(
     always_ff @(posedge gated_clk) begin
         if(!rst_n) begin
             sbox_ready <= 0;
-            rst_trng <= 0;
+            rst_trng <= 1;
             sbox_done <= 0;
             sbox_done_d <= 0;
             sbox_cntr[0] <= 0;
@@ -283,7 +283,7 @@ module sbox(
                     INIT: begin  // this state handles the handshake and accepting SBox inputs
                         // s-box is ready to accept random bits only when all random bits are consumed and this signal functions only when enb_n = 0 else it freezes
                         sbox_ready <= (enb_n && !_enb_n) ? 0 : ((sbox_cntr[0] == 0) ? 1 : 0);
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
 
                         if(trng_dead_flag) fsm_state <= RESET_TRNG;
@@ -299,37 +299,37 @@ module sbox(
                     end
                     TOWER_FIELD: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D;
                     end 
                     MASKED_D: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_D_INV;
                     end
                     MASKED_D_INV: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_A_INV;
                     end
                     MASKED_A_INV: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : MASKED_B_INV;
                     end
                     MASKED_B_INV: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
                         sbox_done <= 0;
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : SUB_BYTES;
                     end
                     SUB_BYTES: begin
                         sbox_ready <= 0;
-                        rst_trng <= 0;
+                        rst_trng <= 1;
 
                         // updating since Sbox has computed subBytes only when enb_n is low
                         if(enb_n && !_enb_n) sbox_cntr[0] <= sbox_cntr[0];
@@ -339,7 +339,7 @@ module sbox(
                         fsm_state <= (trng_dead_flag) ? RESET_TRNG : ((proceed) ? INIT : SUB_BYTES);  // Sbox will advance to next state only when CIPHER/AddRoundKey has aknowledged
                     end
                     RESET_TRNG: begin
-                        rst_trng <= 1;  // resets TRNG as fatal failure has occurred
+                        rst_trng <= 0;  // resets TRNG as fatal failure has occurred
                         sbox_ready <= 0;
                         sbox_done <= 0;
                         sbox_cntr[0] <= 0;
@@ -349,7 +349,7 @@ module sbox(
             end
             else begin  // as Sbox is disabled it will freeze it's state
                 sbox_ready <= 0;
-                rst_trng <= 0;  // as Sbox is disabled, it's not going to drive TRNG's reset
+                rst_trng <= 1;  // as Sbox is disabled, it's not going to drive TRNG's reset
                 sbox_done <= 0;  // as Sbox is in freeze state it's not going to assert done signal
                 sbox_cntr[0] <= sbox_cntr[0];
                 fsm_state <= fsm_state;  // state has been freezed or on hold
