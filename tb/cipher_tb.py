@@ -22,12 +22,15 @@ DUT (cipher_top) interface notes:
   - The TRNG is a real instance fed by raw_rand_bit (noise driver on
     sampling_clk). The cipher stalls its SubBytes rounds until trng_key_valid,
     so no explicit TRNG warm-up is needed -- just a generous timeout.
-  - The cipher free-runs: once rst_n deasserts and key_size is valid, it starts
-    an encryption of whatever is on `state`; after cipher_done it wraps
-    round_cntr to 0 and starts over. Back-to-back encryption works by swapping
-    `state` after a done pulse.
-  - key_size=2'b00 parks the DUT: addRoundKey never raises ark_done, so the
-    cipher sits in round 0. reset_dut() leaves the DUT parked.
+  - cipher now has an active-low enb_n (mirroring invCipher's enable): an ICG
+    cell gates cipher.sv's own clock off entirely while enb_n=1, so the FSM
+    makes no progress at all while parked (same power-saving pattern already
+    used by invCipher.sv). enb_n=0 must be driven to start an encryption of
+    whatever is on `state`/`master_key`/`key_size`; after cipher_done it wraps
+    round_cntr to 0 and starts over. Back-to-back encryption works by keeping
+    enb_n=0 and swapping `state` after a done pulse.
+  - reset_dut() leaves the DUT parked (enb_n=1, key_size=2'b00); run_encryption()
+    drives enb_n=0 (together with master_key/key_size) to start.
   - Only cipher_state/cipher_done are top-level ports now (rand_num/
     sbox_ready/trng_key_valid/trng_dead_flag became internal wires of
     cipher_top rather than ports -- same convention already used in
@@ -285,15 +288,31 @@ def start_clocks(dut):
     cocotb.start_soon(Clock(dut.sampling_clk, SCLK_PERIOD_NS, unit="ns").start())
 
 async def reset_dut(dut):
+    """Reset and park the DUT: enb_n=1 (disabled) and key_size=2'b00.
+
+    enb_n=0 is held DURING the reset pulse (not just rst_n=0), then raised to
+    1 the same cycle rst_n deasserts. cipher.sv's own registers -- round_cntr,
+    temp_state, fsm_state, ark_enb_n, etc. -- only update on its ICG-gated
+    clock, which only ticks while enb_n=0. A previous test can leave the
+    cipher enabled mid-computation (TC1 deliberately parks right after
+    trng_key_valid, well before cipher_done, to test the enable gate itself),
+    so if reset were asserted with enb_n=1 the whole time, the gated clock
+    would never tick and `if(!rst_n)` would never actually execute -- leaving
+    round_cntr/temp_state stuck at their last mid-computation values instead
+    of clearing. Enabling briefly during the reset pulse guarantees at least
+    one real gated-clock edge applies the clear before the DUT is parked.
+    """
     dut.rst_n.value        = 0
     dut.state.value        = 0
     dut.master_key.value   = 0
     dut.key_size.value     = 0   # parks the cipher in round 0 after reset
+    dut.enb_n.value        = 0  # briefly enabled so the gated clock ticks during reset
     dut.raw_rand_bit.value = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
     dut.rst_n.value = 1
+    dut.enb_n.value = 1  # park the DUT now that the reset has actually applied
     await RisingEdge(dut.clk)
-    dut._log.info("DUT reset complete")
+    dut._log.info("DUT reset complete (parked: enb_n=1, key_size=0)")
 
 
 async def signal_monitor(dut, label=""):
@@ -354,6 +373,7 @@ async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
         await ClockCycles(dut.clk, 2)
         dut.master_key.value = model.master_key_rtl_int()
         dut.key_size.value   = key_size_code
+        dut.enb_n.value      = 0
 
     dut_rounds = []
     prev_round = int(dut.CIPHER.round_cntr.value)
@@ -374,6 +394,7 @@ async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
     raise AssertionError(
         f"TIMEOUT ({timeout} cycles): cipher_done never asserted "
         f"(round_cntr={int(dut.CIPHER.round_cntr.value)}, "
+        f"enb_n={int(dut.enb_n.value)}, "
         f"trng_key_valid={int(dut.trng_key_valid.value)}, "
         f"trng_dead_flag={int(dut.trng_dead_flag.value)})")
 
@@ -412,17 +433,18 @@ def report_round_divergence(dut, model, trace, dut_rounds):
 @cocotb.test()
 async def tc1_reset_and_trng_liveness(dut):
     """TC1: outputs are zero after reset and the cipher stays parked while
-    key_size=2'b00. Once the cipher is actually enabled with a real
-    key_size -- as any real controller driving this AES engine would do --
-    the embedded TRNG comes alive on its own (noise source -> health tests
-    -> Keccak) and trng_key_valid asserts.
+    enb_n=1. Once the cipher is actually enabled (enb_n=0, key_size valid) --
+    as any real controller driving this AES engine would do -- the embedded
+    TRNG comes alive on its own (noise source -> health tests -> Keccak) and
+    trng_key_valid asserts. The cipher is then parked again.
 
-    Note: the SBox's internal clock is gated off entirely while the cipher
-    sits parked at key_size=2'b00 (power-saving clock gating on an idle
-    block), so TRNG conditioning cannot progress in that state. That's
-    expected: a power-gated block making no progress while nothing enables
-    it isn't a bug, it's the point of the gating. So TRNG liveness is
-    checked during actual operation, not while deliberately parked.
+    Note: cipher.sv's own clock is gated off entirely while enb_n=1 (an ICG
+    cell, same power-saving pattern already used by invCipher.sv), so the
+    FSM -- and therefore the shared SBox it would otherwise drive -- makes no
+    progress in that state. That's expected: a power-gated block making no
+    progress while nothing enables it isn't a bug, it's the point of the
+    gating. So TRNG liveness is checked during actual operation, not while
+    deliberately parked. (Same reasoning as invCipher_tb's TC1.)
     """
     dut._log.info("=" * 60)
     dut._log.info("TC1: Reset behavior + TRNG liveness")
@@ -437,18 +459,21 @@ async def tc1_reset_and_trng_liveness(dut):
     assert int(dut.cipher_done.value) == 0, "cipher_done not zero after reset"
     dut._log.info(" cipher_state = 0 and cipher_done = 0 after reset")
 
-    # key_size=0 parks the cipher: round_cntr must stay 0
+    # enb_n=1 parks the cipher: no done pulse may ever appear, round_cntr stays 0
     await ClockCycles(dut.clk, 20)
+    assert int(dut.cipher_done.value) == 0, \
+        "cipher_done asserted while cipher is disabled (enb_n=1)"
     assert int(dut.CIPHER.round_cntr.value) == 0, \
-        "cipher advanced past round 0 with key_size=2'b00"
-    dut._log.info(" cipher parked in round 0 while key_size=2'b00")
+        "cipher advanced past round 0 while disabled (enb_n=1)"
+    dut._log.info(" cipher stays parked while enb_n=1")
 
     # Now actually enable the cipher (a real controller would do this to use
     # the AES engine) and confirm the TRNG comes alive on its own.
     dut.master_key.value = 0x2b7e151628aed2a6abf7158809cf4f3c
     dut.state.value      = 0x3243f6a8885a308d313198a2e0370734
     dut.key_size.value   = KEY_SIZE_128
-    dut._log.info(" cipher enabled (key_size=2'b01) -- waiting for TRNG liveness")
+    dut.enb_n.value      = 0
+    dut._log.info(" cipher enabled (enb_n=0, key_size=2'b01) -- waiting for TRNG liveness")
 
     for i in range(20000):
         await RisingEdge(dut.clk)
@@ -459,6 +484,12 @@ async def tc1_reset_and_trng_liveness(dut):
         raise AssertionError("TIMEOUT: trng_key_valid never asserted (20000 cycles)")
 
     assert int(dut.trng_dead_flag.value) == 0, "trng_dead_flag asserted with live noise"
+
+    # Park the cipher again so TC1 leaves the engine in a clean disabled state
+    dut.enb_n.value    = 1
+    dut.key_size.value = 0
+    await ClockCycles(dut.clk, 4)
+    dut._log.info(" cipher parked again (enb_n=1)")
     dut._log.info(" TC1 PASSED")
 
 

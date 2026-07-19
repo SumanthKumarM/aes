@@ -180,6 +180,7 @@ module cipher_top(
     input logic [255:0] master_key,  // MASTER KEY required for key expansion
     input logic [1:0] key_size,  // AES KEY size from CONTROL register
     input logic raw_rand_bit,  // raw random bit from noise source
+    input logic enb_n,  // active low enable signal for CIPHER
     input logic rst_n, sampling_clk, clk);
 
     // CIPHER <-> addRoundKey connections
@@ -269,6 +270,7 @@ module cipher_top(
         .key_size(key_size),
         .sbox_done_pulse(sbox_done_pulse),
         .ark_done(ark_done),
+        .enb_n(enb_n),
         .rst_n(rst_n),
         .clk(clk));
 endmodule
