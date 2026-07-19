@@ -16,6 +16,7 @@ module addRoundKey(
     output logic ark_done,  // indicates that addRoundKey is done with computation
     output word_t sbox_state,  // rotated version of generated KEY is sent to SBox as input
     output logic [1:0] sbox_enb_n,  // enable signal which enables or disables only a portion of SBox
+    output logic sbox_proceed,  // signal to SBox to advance to next state only when AddRoundKey has aknowledged
     input state_matrix_t state,  // input state matrix
     input u256_t master_key,  // input master KEY
     input word_t subByte,  // subBytes computed by SBox is taken as input
@@ -46,7 +47,7 @@ module addRoundKey(
     logic gated_clk;  // gated clock to reduce dynamic power consumption
 
     // ICG cell to reduce dynamic power consumption
-    icg ICG(gated_clk, (~enb_n | ark_done), clk);  // ark_done is also included in enable because AddRoundKey needs another clk cycle so that it enters disable branch and clears ark_done 
+    icg ICG(gated_clk, (~enb_n | ark_done | ~rst_n), clk);  // ark_done is also included in enable because AddRoundKey needs another clk cycle so that it enters disable branch and clears ark_done 
 
     // function that return RCON index based on CIPHER round
     function automatic unibble rcon_idx(input unibble rn, input unibble Nk);
@@ -195,7 +196,7 @@ module addRoundKey(
     always_ff @(posedge gated_clk) begin
         if(!rst_n) begin
             ark_done <= 0;
-
+            sbox_proceed <= 0;
             for(int i=0; i<32; i++) prev_expKey[i/8][i%8] <= 8'h00;
             for(int i=0; i<16; i++) addRoundKeyOut[i/4][i%4] <= 8'h00;
         end
@@ -205,6 +206,7 @@ module addRoundKey(
                     2'b01: begin  // AES-128
                         if(round_num == 0) begin  // first round simply uses master KEY
                             ark_done <= 1;  // made high since addRoundKey output is available
+                            sbox_proceed <= 0;
 
                             for(int i=0; i<4; i++) begin
                                 // simply loading maskter KEY into expKey for further usage
@@ -219,8 +221,6 @@ module addRoundKey(
                         else begin  // remianing rounds use expanded KEYs
                             for(int i=0; i<4; i++) begin
                                 if(sbox_done) begin  // updating the register since sbox_done is high 
-                                    ark_done <= 1;  // made high since addRoundKey output is available
-
                                     // updating current round KEYs so that these can be used in next round as previous round KEYs
                                     {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
 
@@ -228,9 +228,13 @@ module addRoundKey(
                                         {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {state[3][i], state[2][i], state[1][i], state[0][i]} ^ {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
                                     else  // just passing the expanded KEY as output
                                         {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
+
+                                    ark_done <= 1;  // made high since addRoundKey output is available
+                                    sbox_proceed <= 1;
                                 end
                                 else begin  // holding the previous round KEYs since sbox_done is not high
                                     ark_done <= 0;
+                                    sbox_proceed <= 0;
                                     {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
                                 end
@@ -239,8 +243,6 @@ module addRoundKey(
                     end 
                     2'b10: begin  // AES-192
                         if(round_num == 0) begin  // first round simply uses master KEY
-                            ark_done <= 1;  // made high since addRoundKey output is available
-
                             for(int i=0; i<6; i++)  // simply loading maskter KEY into expKey for further usage
                                 {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= master_key[(32*i) +: 32];
 
@@ -250,13 +252,14 @@ module addRoundKey(
                                 else  // just passing the master KEY as output
                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= master_key[(32*i) +: 32];
                             end
+
+                            ark_done <= 1;  // made high since addRoundKey output is available
+                            sbox_proceed <= 0;
                         end
                         else begin  // remianing rounds use expanded KEYs
                             case(concatenate_sel(round_num))
                                 2'b01: begin
                                     if(sbox_done) begin  // updating the register since sbox_done is high  
-                                        ark_done <= 1;  // made high since addRoundKey output is available
-
                                         for(int i=0; i<6; i++)  // updating current round KEYs so that these can be used in next round as previous round KEYs
                                             {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
                                         
@@ -266,21 +269,23 @@ module addRoundKey(
                                             else  // just passing the expanded KEY as output
                                                 {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
                                         end
+
+                                        ark_done <= 1;  // made high since addRoundKey output is available
+                                        sbox_proceed <= 1;
                                     end
                                     else begin  // holding the previous round KEYs since sbox_done is not high
-                                        ark_done <= 0;
-
                                         for(int i=0; i<6; i++)
                                             {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
                                         
                                         for(int i=0; i<4; i++)
                                             {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+
+                                        ark_done <= 0;
+                                        sbox_proceed <= 0;
                                     end
                                 end 
                                 2'b10: begin
                                     if(sbox_done) begin  // updating the register since sbox_done is high  
-                                        ark_done <= 1;  // made high since addRoundKey output is available
-
                                         for(int i=0; i<6; i++)  // updating current round KEYs so that these can be used in next round as previous round KEYs
                                             {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]};
                                         
@@ -298,20 +303,22 @@ module addRoundKey(
                                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {expKey[3][i-2], expKey[2][i-2], expKey[1][i-2], expKey[0][i-2]};
                                             end
                                         end
+
+                                        ark_done <= 1;  // made high since addRoundKey output is available
+                                        sbox_proceed <= 1;
                                     end
                                     else begin  // holding the previous round KEYs since sbox_done is not high
-                                        ark_done <= 0;
-
                                         for(int i=0; i<6; i++)
                                             {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
                                         
                                         for(int i=0; i<4; i++)
                                             {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+                                        
+                                        ark_done <= 0;
+                                        sbox_proceed <= 0;
                                     end
                                 end
                                 2'b11: begin  // these rounds don't actually require new expanded KEYs, they use previous KEYs
-                                    ark_done <= 1;  // made high since addRoundKey output is available
-
                                     for(int i=0; i<6; i++)  // continues to hold the previous round KEYs since new KEYs are not computed
                                         {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
 
@@ -321,23 +328,25 @@ module addRoundKey(
                                         else  // just passing the expanded KEY as output
                                             {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {prev_expKey[3][i+2], prev_expKey[2][i+2], prev_expKey[1][i+2], prev_expKey[0][i+2]};
                                     end
+
+                                    ark_done <= 1;  // made high since addRoundKey output is available
+                                    sbox_proceed <= 0;
                                 end
                                 default: begin
-                                    ark_done <= 0;
-
                                     for(int i=0; i<6; i++)
                                         {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
 
                                     for(int i=0; i<4; i++)
                                         {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+
+                                    ark_done <= 0;
+                                    sbox_proceed <= 0;
                                 end
                             endcase
                         end
                     end
                     2'b11: begin  // AES-256
                         if(round_num == 0) begin  // first round simply uses master KEY
-                            ark_done <= 1;  // made high since addRoundKey output is available
-
                             for(int i=0; i<8; i++)  // simply loading maskter KEY into expKey for further usage
                                 {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= master_key[(32*i) +: 32];
 
@@ -347,10 +356,11 @@ module addRoundKey(
                                 else  // just passing the master KEY as output
                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= master_key[(32*i) +: 32];
                             end
+
+                            ark_done <= 1;  // made high since addRoundKey output is available
+                            sbox_proceed <= 0;
                         end
                         else if(round_num == 1) begin  // this round also doesn't need any new KEY as it uses upper half of master KEY which is already available in prev_expKey
-                            ark_done <= 1;  // made high since addRoundKey output is available
-
                             for(int i=0; i<8; i++)  // continues to hold the previous round KEYs since new KEYs are not computed
                                 {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
 
@@ -360,11 +370,12 @@ module addRoundKey(
                                 else  // just passing the expanded KEY as output
                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]};
                             end
+
+                            ark_done <= 1;  // made high since addRoundKey output is available
+                            sbox_proceed <= 0;
                         end
                         else begin  // remianing rounds use expanded KEYs
-                            if(sbox_done) begin  // updating the register since sbox_done is high 
-                                ark_done <= 1;  // made high since addRoundKey output is available
-                                
+                            if(sbox_done) begin  // updating the register since sbox_done is high     
                                 if(round_num[0] == 1) begin  // odd rounds don't generate new expanded KEYs, so previous batch KEYs are used
                                     for(int i=0; i<4; i++) begin  // updating current round KEYs so that these can be used in next round as previous round KEYs
                                         {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]} <= {expKey[3][i+4], expKey[2][i+4], expKey[1][i+4], expKey[0][i+4]};
@@ -391,37 +402,43 @@ module addRoundKey(
                                         {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]} <= {prev_expKey[3][i+4], prev_expKey[2][i+4], prev_expKey[1][i+4], prev_expKey[0][i+4]};
                                     end
                                 end
+
+                                ark_done <= 1;  // made high since addRoundKey output is available
+                                sbox_proceed <= 1;
                             end
                             else begin  // holding the previous round KEYs since sbox_done is not high
-                                ark_done <= 0;
-
                                 for(int i=0; i<8; i++)
                                     {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
                                 
                                 for(int i=0; i<4; i++)
                                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+
+                                ark_done <= 0;
+                                sbox_proceed <= 0;
                             end
                         end
                     end
                     default: begin
-                        ark_done <= 0;
-
                         for(int i=0; i<8; i++)
                             {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= 32'h0000_0000;
                         
                         for(int i=0; i<4; i++)
                             {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= 32'h0000_0000;
+
+                        ark_done <= 0;
+                        sbox_proceed <= 0;
                     end
                 endcase
             end
             else begin  // holds its state when disabled
-                ark_done <= 0;
-                
                 for(int i=0; i<8; i++)
                     {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]};
                 
                 for(int i=0; i<4; i++)
                     {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]} <= {addRoundKeyOut[3][i], addRoundKeyOut[2][i], addRoundKeyOut[1][i], addRoundKeyOut[0][i]};
+
+                ark_done <= 0;
+                sbox_proceed <= 0;
             end
         end
     end
