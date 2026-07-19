@@ -99,7 +99,7 @@ module addRoundKey_top (
     output logic sbox_ready,  // S-box ready for next input
     output logic sbox_done_pulse,  // single clock cycle pulse when Sbox has computed SubBytes
     output logic trng_key_valid,  // TRNG: data is valid
-    input logic [255:0] master_key,  // input master KEY
+    input u256_t master_key,  // input master KEY
     input state_matrix_t state,  // input state matrix
     input unibble round_num,  // input CIPHER which indicates number of AES rounds
     input logic [1:0] key_size,  // input from CONTROL register specifying the KEY size
@@ -177,7 +177,7 @@ module cipher_top(
     output state_matrix_t cipher_state,  // state matrix that has gone through whole CIPHER algorithm
     output logic cipher_done,  // becomes high when CIPHER is done computing transformed state
     input state_matrix_t state,  // input state matrix (plain text)
-    input logic [255:0] master_key,  // MASTER KEY required for key expansion
+    input u256_t master_key,  // MASTER KEY required for key expansion
     input logic [1:0] key_size,  // AES KEY size from CONTROL register
     input logic raw_rand_bit,  // raw random bit from noise source
     input logic enb_n,  // active low enable signal for CIPHER
