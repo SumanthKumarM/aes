@@ -116,7 +116,7 @@ module cipher(
                             sbox_proceed <= 0;  // this is ignore as AddRoundKey itself will set this signal
 
                             // AddRoundKey is disabled when it has computed the output to protect it from using stale previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
-                            ark_enb_n <= (ark_done) ? 1 : 0;
+                            ark_enb_n <= ark_done;
 
                             // since AddRoundKey is enabled, wiring AddRoundKey generated KEY to SBox
                             sbox_state[127:32] <= 96'd0;  // these bits are not required for SBox as AddRoundKey only generates 32-bit KEY for SBox to consume
