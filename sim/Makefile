@@ -57,7 +57,7 @@ $(TRNG_PARAM_FILE): $(SIM_DIR)/gen_param.py
 # cocotb simulation). Generated on demand by gen_top.py; never committed to
 # git, and never used by lint/synth/standalone RTL compilation -- those only
 # ever see the real design files referenced below.
-GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top
+GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top
 
 # RTL sources
 # composite_field_math_pkg is a foundational package (imports only type_defs_pkg)
@@ -68,7 +68,7 @@ GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCiphe
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 
-ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top),)
+ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
     VERILOG_SOURCES += $(TRNG_PARAM_FILE)
 endif
@@ -92,6 +92,13 @@ else ifeq ($(block),invCipher)
 	# addRoundKey is NOT included -- it sits at the same hierarchy level as
 	# invCipher (shared with cipher) and is only wired in by invCipher_top
 	VERILOG_SOURCES += $(RTL_DIR)/invSbox.sv $(RTL_DIR)/invShiftRows.sv $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),invAddRoundKey_top)
+	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invAddRoundKey.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),invAddRoundKey)
+	# invAddRoundKey receives exp_key/ark_done from an externally-wired
+	# AddRoundKey (same sibling-hierarchy pattern as cipher/invCipher) --
+	# it does not instantiate sbox/addRoundKey itself
+	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),icg)
 	# icg.sv is already in base VERILOG_SOURCES, so not needed here
 else

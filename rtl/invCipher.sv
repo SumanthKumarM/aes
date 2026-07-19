@@ -42,7 +42,7 @@ module invCipher(
     invCipher_internal_states fsm_state;
 
     // sub-module instances
-    icg ICG(gated_clk, ~enb_n, clk);  // ICG cell to reduce dynamic power consumption
+    icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
     invShiftRows InvShiftRows(invsr_state_out, invsr_state_in);
     invSbox InvSBox(invSubBytes, invSbox_ready, invSbox_done_pulse, rst_trng, invSbox_state, rand_num, trng_dead_flag, trng_key_valid, invSbox_proceed, invSbox_enb_n, rst_n, clk);
     invMixColumns InvMixColumns(invmc_state_out, ark_state_out);
@@ -50,13 +50,11 @@ module invCipher(
     always_comb begin
         internal_state = fsm_state;
 
-        // number of total invCIPHER rounds (Nr) based on KEY size
-        case(key_size)
-            2'b01: Nr = 4'hA;
-            2'b10: Nr = 4'hc;
-            2'b11: Nr = 4'hE; 
-            default: Nr = 4'h0;
-        endcase
+        // number of total CIPHER rounds (Nr) based on KEY size
+        //   KEY size = 01 (AES-128): Nr = 10
+        //   KEY size = 10 (AES-192): Nr = 12
+        //   KEY size = 11 (AES-256): Nr = 14
+        Nr = {(key_size[1] | key_size[0]), key_size[1], key_size[0], 1'b0};
 
         // invCIPHER counts round number from Nr down to 0 but AddRoundKey requires it from 0 to Nr so mapping it accordingly
         ark_round_num = Nr - round_cntr;

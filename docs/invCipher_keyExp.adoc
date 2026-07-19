@@ -1,0 +1,54 @@
+= AES INVCIPHER Key Expansion Strategy
+:description: How invAddRoundKey reconciles INVCIPHER's reverse-order round-key requirement with addRoundKey's forward-only expansion architecture
+:toc:
+:toc-title: Table of Contents
+:sectnums:
+:stem:
+
+== Overview
+
+CIPHER and INVCIPHER share a single AES key schedule but consume it in opposite directions. `addRoundKey.sv` (see link:keyExp_logic.adoc[AES Key Expansion & AddRoundKey Implementation]) only ever produces that schedule moving forward, one round at a time, retaining nothing but the current batch.
+
+`invAddRoundKey.sv` reconciles this: it drives `addRoundKey.sv` through a full forward pass, buffers every round key as it's produced, and then serves them back to INVCIPHER in whatever order it asks for. This document describes that design as implemented and verified.
+
+== NIST Key Schedule Requirement
+
+FIPS 197 defines CIPHER and INVCIPHER as sharing a single key schedule `w`, generated once by `KeyExpansion()`, but consumed in opposite directions:
+
+* *CIPHER (Encryption)*: consumes `w[0..3], w[4..7], ..., w[4*Nr..4*Nr+3]` — forward order.
+* *INVCIPHER (Decryption)*: consumes `w[4*Nr..4*Nr+3], w[4*(Nr-1)..4*(Nr-1)+3], ..., w[0..3]` — reverse order.
+
+The schedule itself is identical between the two; only the traversal direction differs.
+
+== Architecture: Key Schedule Buffer
+
+`invAddRoundKey.sv` is a dedicated module sitting alongside `invCipher.sv` at the same hierarchy level (mirroring how `addRoundKey.sv` sits alongside `cipher.sv`). It is not embedded inside `invCipher.sv`, and it does not reimplement key expansion — it drives the existing `addRoundKey.sv` as an external, forward-only expansion engine, and owns a buffer, `key_mem`, that captures every round key as `addRoundKey.sv` produces it.
+
+The key schedule is deterministic — for a given master key, there is exactly one correct sequence of round keys, regardless of the order in which they are later consumed. Storing the forward-computed values and indexing them backward is therefore guaranteed to agree with what a from-scratch backward derivation would produce, without needing any backward key-expansion mathematics: correctness of the buffer reduces entirely to "did we store what `addRoundKey` produced."
+
+`key_mem` (`logic [3:0][59:0][7:0]`) is sized uniformly for the largest supported key rather than per-key-size: 60 words per row, covering AES-256's `Nr+1=15` round keys x 4 words each. AES-128 and AES-192 simply use a prefix of the buffer.
+
+== Two-Phase Control Flow
+
+`invAddRoundKey` runs a two-phase FSM, gated by an internal `keys_received` register:
+
+*Acquisition phase* (`!keys_received`) — `invAddRoundKey` drives `addRoundKey.sv` forward through the schedule exactly as CIPHER does: asserting `ark_enb_n`, driving `round_cntr` as `addRoundKey`'s `round_num` input from 0 up to `Nr`, and requesting `key_only_mode` (which makes `addRoundKey` return the raw expanded key words rather than XORing them into a state). Each round's key lands in `key_mem` slot `round_cntr` when `addRoundKey` asserts `ark_done`. Once slot `Nr` is captured, `keys_received`/`keys_rx_done` latch and the FSM moves to the addition phase.
+
+*Inverse key-addition phase* (`keys_received`) — `addRoundKey` is disabled (`ark_enb_n<=1`); every enabled cycle, `invAddRoundKeyOut <= state ^ key_mem[invCipher_round]` is registered. INVCIPHER supplies `invCipher_round` already mapped to whichever NIST round index it currently needs — reverse traversal is entirely the caller's responsibility; `invAddRoundKey` just indexes the buffer built during acquisition. When INVCIPHER has consumed the last key it needs, it asserts `invARK_proceed`, returning the FSM to the acquisition phase (e.g. ahead of the next decryption operation).
+
+As a correctness property: buffer slot 0 must always equal the master key, since round 0's key schedule word is the master key itself. This is exercised directly in verification — every acquisition test dumps and checks `key_mem` slot-by-slot against the NIST reference schedule, including slot 0, confirming the buffer was populated correctly by the forward pass.
+
+== Handshake Subtlety: `ark_done` Level vs. Pulse
+
+`ark_done` is a *level*, not a pulse — for whichever rounds `addRoundKey.sv` computes without needing the S-Box (round 0 for every key size, several rounds of AES-192, and rounds 0-1 of AES-256), `ark_done` can stay asserted for more than one cycle. A naive read of `ark_done` would double-count these rounds, so the acquisition phase edge-detects it (`ark_done && !ark_done_d`).
+
+Edge detection alone is not sufficient for AES-256's rounds 0 and 1, however: both are computed without the S-Box, back-to-back, with no gap between them at all — `ark_done` never actually falls in between, so there is no edge to detect for round 1's key. The reason is a one-cycle propagation delay: `round_num` is a bare wire off `round_cntr` (not re-registered), so `addRoundKey.sv` needs one full settled cycle to react to a new `round_num` value before its response is trustworthy; advancing `round_cntr` the instant `ark_done` reads high outruns that settling time and captures a stale repeat of the previous round's data instead of the new round's. The fix is a second, narrowly-scoped settle-gate (`round_cntr_d`, a 1-cycle-delayed `round_cntr`) used only for AES-256's first two rounds, holding `round_cntr` at a value for one extra cycle so `addRoundKey.sv`'s genuine response has time to arrive before the counter moves on.
+
+This is recorded here because it is a general lesson for this codebase, not just an AES-256 quirk: whenever a downstream block consumes a value that is a raw wire off an upstream register (rather than being re-registered), a plain rising-edge check on the downstream block's own response signal is not enough if that response can hold its level across the value's transition — which happens whenever two consecutive values are both "unconditional" (no-wait) in the downstream FSM.
+
+== References
+
+* *FIPS 197* — Advanced Encryption Standard (AES), NIST, 2001 (updated 2023), Section 5.2 (`KeyExpansion()`) and Section 5.3 (`INVCIPHER()`). +
+  https://doi.org/10.6028/NIST.FIPS.197-upd1
+
+* link:keyExp_logic.adoc[AES Key Expansion & AddRoundKey Implementation] — the forward expansion datapath this document builds on, and the block `invAddRoundKey` drives to fill its buffer.

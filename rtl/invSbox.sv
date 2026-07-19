@@ -32,7 +32,7 @@ module invSbox(
     genvar i;
 
     // ICG cell to reduce dynamic power consumption
-    icg ICG(gated_clk, ~enb_n, clk);
+    icg ICG(gated_clk, (~enb_n | ~rst_n), clk);
 
     // separate sequental block is used to update FSM states, sbox_done and rst_trng so as to avoid being driven for multiple times
     always_ff @(posedge gated_clk) begin
