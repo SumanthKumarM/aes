@@ -1,6 +1,17 @@
 """
 Cocotb testbench for the CIPHER block (cipher.sv), verified through the
-auto-generated cipher_top wrapper (cipher + real TRNG instance).
+auto-generated cipher_top wrapper.
+
+cipher.sv itself only implements ShiftRows/MixColumns and the round FSM --
+SBox and AddRoundKey are instantiated as SIBLINGS of CIPHER inside cipher_top
+(not nested inside cipher.sv), since both are shared resources also used by
+the future invCIPHER block. cipher_top wires CIPHER to a real TRNG + a single
+shared SBox instance + a single AddRoundKey instance: CIPHER owns the shared
+SBox for its own SubBytes step (sbox_enb_n=2'b01) and hands control of it to
+AddRoundKey during KeyExpansion (sbox_enb_n <= ark_sbox_enb_n), acknowledging
+via sbox_proceed <= 1 in sync with ark_done -- this is the same
+"caller-gates-its-own-enable" pattern already validated on invCipher's SBox
+sharing (see project docs/RTL bug history for that block).
 
 Golden reference: a NIST FIPS 197 software model (key expansion + full
 encryption with per-round intermediates). The model self-checks against the
@@ -17,6 +28,12 @@ DUT (cipher_top) interface notes:
     `state` after a done pulse.
   - key_size=2'b00 parks the DUT: addRoundKey never raises ark_done, so the
     cipher sits in round 0. reset_dut() leaves the DUT parked.
+  - Only cipher_state/cipher_done are top-level ports now (rand_num/
+    sbox_ready/trng_key_valid/trng_dead_flag became internal wires of
+    cipher_top rather than ports -- same convention already used in
+    addRoundKey_top). Verilator's --public-flat-rw still exposes internal
+    signals directly by name, so dut.trng_key_valid / dut.trng_dead_flag
+    below keep working unchanged.
 
 RTL data representation (same convention the addRoundKey TB validated):
   - state_matrix_t = logic [3:0][3:0][7:0]: state[row][col] at bits (row*4+col)*8
@@ -31,7 +48,12 @@ the first cipher round where the DUT diverged from the NIST reference.
 
 Signal access notes (Verilator, --public-flat-rw):
   - dut.cipher_state, dut.cipher_done, dut.trng_key_valid   -- top-level ports
+    or exposed internal wires (see note above)
   - dut.CIPHER.round_cntr, dut.CIPHER.temp_state, dut.CIPHER.fsm_state
+  - dut.SBOX, dut.AddRoundKey -- sibling instances of CIPHER inside
+    cipher_top (not currently probed by this TB, but available if a future
+    test needs to inspect the shared SBox/AddRoundKey directly; note the
+    ALL-CAPS "SBOX" instance name, distinct from addRoundKey_top's "SBox")
 """
 
 import cocotb

@@ -103,6 +103,7 @@ module addRoundKey_top (
     input state_matrix_t state,  // input state matrix
     input unibble round_num,  // input CIPHER which indicates number of AES rounds
     input logic [1:0] key_size,  // input from CONTROL register specifying the KEY size
+    input logic key_only_mode,  // when high, addRoundKeyOut carries the expanded KEY alone (no state XOR)
     input logic raw_rand_bit,  // raw random bit from noise source
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic ark_enb_n,  // addRoundKey enable signal
@@ -161,6 +162,7 @@ module addRoundKey_top (
         .subByte(subByte),
         .round_num(round_num),
         .key_size(key_size),
+        .key_only_mode(key_only_mode),
         .sbox_done(sbox_done_pulse),
         .enb_n(ark_enb_n),
         .rst_n(rst_n),
@@ -173,19 +175,38 @@ import type_defs_pkg::*;
 
 module cipher_top(
     output state_matrix_t cipher_state,  // state matrix that has gone through whole CIPHER algorithm
-    output logic [1679:0] rand_num,  // random data from TRNG
     output logic cipher_done,  // becomes high when CIPHER is done computing transformed state
-    output logic sbox_ready,  // sbox acknowledges receiption of random words
-    output logic trng_key_valid,  // tells S-box that random words are ready
-    output logic trng_dead_flag,  // TRNG has encountered fatal error
     input state_matrix_t state,  // input state matrix (plain text)
     input logic [255:0] master_key,  // MASTER KEY required for key expansion
     input logic [1:0] key_size,  // AES KEY size from CONTROL register
     input logic raw_rand_bit,  // raw random bit from noise source
     input logic rst_n, sampling_clk, clk);
 
+    // CIPHER <-> addRoundKey connections
+    state_matrix_t ark_state;  // input state to addRoundKey
+    state_matrix_t addRoundKeyOut;  // output of addRoundKey back to CIPHER
+    unibble round_num;  // CIPHER round count, fed to addRoundKey as round_num
+    logic ark_enb_n;  // enable signal to AddRoundKey
+    logic ark_done;  // asserted when AddRoundKey has computed the output
+
+    // CIPHER <-> shared Sbox connections (byte-mode SubBytes path)
+    u128_t sbox_state;  // 128-bit input state matrix to SBox
+    u128_t subBytes;  // SubBytes result for each byte of the state array
+    logic [1:0] sbox_enb_n;  // enable signal to SBox (CIPHER drives directly, or passes through ark_sbox_enb_n)
+    logic sbox_proceed;  // acknowledges sbox_done_pulse so Sbox can advance
+
+    // addRoundKey <-> shared Sbox connections (word-mode KeyExpansion path)
+    logic [1:0] ark_sbox_enb_n;  // AddRoundKey requesting the shared Sbox
+    word_t ark_sbox_word;  // generated KEY word from AddRoundKey sent to SBox
+    logic sbox_done_pulse;  // Sbox has computed the requested SubBytes/subWord
+    logic sbox_ready;  // tells TRNG that Sbox is ready to accept random bits
+
+    // TRNG connections
     logic rst_trng;  // resets TRNG when health test results in fatal failures
     logic trng_rst;  // combined reset driven into TRNG
+    logic trng_key_valid;  // TRNG: data is valid
+    logic trng_dead_flag;  // TRNG has encountered fatal error
+    logic [1679:0] rand_num;  // random data from TRNG
 
     assign trng_rst = rst_n & rst_trng;
 
@@ -199,17 +220,55 @@ module cipher_top(
         .clk(clk),
         .ext_rst_n(trng_rst));
 
+    sbox SBOX(
+        .subBytes(subBytes),
+        .sbox_ready(sbox_ready),
+        .sbox_done_pulse(sbox_done_pulse),
+        .rst_trng(rst_trng),
+        .trng_dead_flag(trng_dead_flag),
+        .state(sbox_state),
+        .rand_num(rand_num),
+        .trng_key_valid(trng_key_valid),
+        .proceed(sbox_proceed),
+        .enb_n(sbox_enb_n[1]),
+        ._enb_n(sbox_enb_n[0]),
+        .rst_n(rst_n),
+        .clk(clk));
+
+    addRoundKey AddRoundKey(
+        .addRoundKeyOut(addRoundKeyOut),
+        .ark_done(ark_done),
+        .sbox_state(ark_sbox_word),
+        .sbox_enb_n(ark_sbox_enb_n),
+        .state(ark_state),
+        .master_key(master_key),
+        .subByte(subBytes[31:0]),
+        .round_num(round_num),
+        .key_size(key_size),
+        .key_only_mode(1'b0),  // since this is CIPHER mode this signal is tied to logic low
+        .sbox_done(sbox_done_pulse),
+        .enb_n(ark_enb_n),
+        .rst_n(rst_n),
+        .clk(clk));
+
     cipher CIPHER(
         .cipher_state(cipher_state),
+        .round_cntr(round_num),
         .cipher_done(cipher_done),
-        .sbox_ready(sbox_ready),
-        .rst_trng(rst_trng),
+        .ark_state(ark_state),
+        .sbox_state(sbox_state),
+        .sbox_enb_n(sbox_enb_n),
+        .sbox_proceed(sbox_proceed),
+        .ark_enb_n(ark_enb_n),
         .state(state),
-        .rand_num(rand_num),
         .master_key(master_key),
+        .subBytes(subBytes),
+        .addRoundKeyOut(addRoundKeyOut),
+        .ark_sbox_word(ark_sbox_word),
+        .ark_sbox_enb_n(ark_sbox_enb_n),
         .key_size(key_size),
-        .trng_key_valid(trng_key_valid),
-        .trng_dead_flag(trng_dead_flag),
+        .sbox_done_pulse(sbox_done_pulse),
+        .ark_done(ark_done),
         .rst_n(rst_n),
         .clk(clk));
 endmodule

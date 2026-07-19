@@ -11,6 +11,12 @@ DUT (addRoundKey_top) interface notes:
     (sbox_ready stays low), so rand_num content is irrelevant to functional
     correctness -- the masking shares cancel out regardless.
   - ark_enb_n must be driven low to enable addRoundKey.
+  - key_only_mode: when driven high, addRoundKeyOut carries the expanded KEY
+    words directly (no XOR with `state`) -- used so a caller can pull the
+    raw key schedule out of addRoundKey (e.g. invCipher's key-schedule
+    buffer) without needing a state input at all. `state` is fully ignored
+    in this mode; TC17-TC19 drive it to a nonzero garbage pattern to prove
+    that.
 
 RTL data representation notes:
   - state_matrix_t = logic [3:0][3:0][7:0]: state[row][col] at bits (row*4+col)*8
@@ -274,6 +280,20 @@ def get_expkey_word(expkey_int, word_idx):
         result |= byte << (row*8)
     return result
 
+def get_state_word(state_int, col):
+    """Extract 32-bit NIST key word from a state_matrix_t-shaped integer at column `col`.
+
+    Same RTL-row-to-NIST-byte convention as get_expkey_word() (RTL row 3 = MSByte,
+    RTL row 0 = LSByte), but state_matrix_t uses a 4-wide row stride (one word per
+    column) instead of expKey_matrix_t's 8-wide stride. Used to read addRoundKeyOut
+    directly as a key word when key_only_mode=1 bypasses the state XOR.
+    """
+    result = 0
+    for row in range(4):
+        byte = (state_int >> ((row*4 + col)*8)) & 0xFF
+        result |= byte << (row*8)
+    return result
+
 # Noise source for the real TRNG instance inside addRoundKey_top
 class NoiseBitBuffer:
     """Random bit stream for raw_rand_bit. Prefers the physics-based
@@ -316,6 +336,7 @@ async def reset_dut(dut):
     dut.key_size.value     = 0
     dut.state.value        = 0
     dut.master_key.value   = 0
+    dut.key_only_mode.value = 0  # default: normal state XOR expanded-key mode
     dut.raw_rand_bit.value = 0
     dut.ark_enb_n.value    = 0  # keep addRoundKey enabled
     await ClockCycles(dut.clk, RESET_CYCLES)
@@ -379,6 +400,7 @@ async def tc1_reset(dut):
     dut.key_size.value       = KEY_SIZE_128
     dut.state.value          = 0xDEADBEEFCAFEBABE1234567890ABCDEF
     dut.master_key.value     = 0xDEADBEEFCAFEBABE1234567890ABCDEF
+    dut.key_only_mode.value  = 0
     dut.raw_rand_bit.value   = 0
     dut.ark_enb_n.value      = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
@@ -1363,4 +1385,256 @@ async def tc16_per_round_key_comparison_aes256(dut):
         assert False, f"TC16 FAILED: {len(mismatches)} mismatches"
 
     dut._log.info("TC16 PASSED — AES-256 key expansion matches reference model")
+    dut._log.info("=" * 60)
+
+
+# TC17: AES-128 key_only_mode — addRoundKeyOut carries the expanded key alone
+@cocotb.test()
+async def tc17_aes128_key_only_mode(dut):
+    """TC17: AES-128 with key_only_mode=1 — addRoundKeyOut must equal the raw
+    expanded-key words directly (w[4*rnd..4*rnd+3]), with no state XOR applied.
+
+    `state` is driven to a nonzero garbage pattern throughout and never
+    changed, so any dependency of addRoundKeyOut on state would show up as a
+    mismatch against the NIST reference words.
+    """
+    dut._log.info("=" * 60)
+    dut._log.info("TC17: AES-128 key_only_mode (10 rounds)")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC17"))
+
+    key_bytes = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    Nk, Nr = 4, 10
+    ref = AESReferenceModel(key_bytes)
+    ref.dump_key_schedule(dut._log.info)
+
+    # Garbage state that must be ignored entirely in key_only_mode
+    garbage_state  = plaintext_to_rtl_state(list(range(0xF0, 0xE0, -1)))
+    master_key_int = ref.master_key_rtl_int()
+
+    dut.round_num.value      = 0
+    dut.key_size.value       = KEY_SIZE_128
+    dut.state.value          = garbage_state
+    dut.master_key.value     = master_key_int
+    dut.key_only_mode.value  = 1
+    await ClockCycles(dut.clk, 2)
+
+    # Round 0: addRoundKeyOut must equal w[0..3] directly (master key, no XOR)
+    ark_r0 = int(dut.addRoundKeyOut.value)
+    dut._log.info("Round 0: verifying addRoundKeyOut == master key words (no state XOR)")
+    mismatches = []
+    for wi in range(Nk):
+        rtl_word  = get_state_word(ark_r0, wi)
+        nist_word = ref.w[wi]
+        match = "PASS" if rtl_word == nist_word else "FAIL"
+        if rtl_word != nist_word:
+            mismatches.append(f"Round 0 w[{wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+        dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    # Rounds 1-10: addRoundKeyOut must equal each round's expanded key words directly
+    dut._log.info("=== ROUNDS 1-10: key_only_mode addRoundKeyOut vs NIST ===")
+    for rnd in range(1, Nr + 1):
+        dut._log.info(f"--- Round {rnd} ---")
+        dut.round_num.value = rnd
+
+        cyc = await wait_sbox_done(dut)
+        dut._log.info(f"  sbox_done after {cyc} cycles")
+        await RisingEdge(dut.clk)
+
+        ark_out = int(dut.addRoundKeyOut.value)
+        nist_rk = ref.get_round_key_words(rnd)
+
+        for wi in range(Nk):
+            rtl_word  = get_state_word(ark_out, wi)
+            nist_word = nist_rk[wi]
+            match = "PASS" if rtl_word == nist_word else "FAIL"
+            if rtl_word != nist_word:
+                mismatches.append(f"Round {rnd} w[{Nk*rnd+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+            dut._log.info(f"  w[{Nk*rnd+wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    dut._log.info("\n" + "=" * 60)
+    if mismatches:
+        dut._log.warning(f"TC17: {len(mismatches)} mismatch(es) found:")
+        for m in mismatches:
+            dut._log.warning(f"  {m}")
+        assert False, f"TC17 FAILED: {len(mismatches)} key_only_mode mismatches"
+
+    dut._log.info("TC17 PASSED — AES-128 key_only_mode gives raw expanded key, unaffected by state")
+    dut._log.info("=" * 60)
+
+
+# TC18: AES-192 key_only_mode — addRoundKeyOut carries the expanded key alone
+@cocotb.test()
+async def tc18_aes192_key_only_mode(dut):
+    """TC18: AES-192 with key_only_mode=1 — addRoundKeyOut must equal the raw
+    expanded-key words directly, including through the concat_sel bypass
+    rounds (2, 5, 8, 11), with `state` held at a nonzero garbage pattern.
+
+    Mirrors TC15's per-round batch/word bookkeeping, but checks
+    addRoundKeyOut (via get_state_word) instead of prev_expKey, since the
+    property under test is what the module OUTPUTS in key_only_mode, not
+    merely what it stores internally.
+    """
+    dut._log.info("=" * 60)
+    dut._log.info("TC18: AES-192 key_only_mode (12 rounds)")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC18"))
+
+    key_bytes = bytes.fromhex("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b")
+    Nk, Nr = 6, 12
+    ref = AESReferenceModel(key_bytes)
+    ref.dump_key_schedule(dut._log.info)
+
+    garbage_state  = plaintext_to_rtl_state(list(range(0xF0, 0xE0, -1)))
+    master_key_int = ref.master_key_rtl_int()
+
+    dut.round_num.value      = 0
+    dut.key_size.value       = KEY_SIZE_192
+    dut.state.value          = garbage_state
+    dut.master_key.value     = master_key_int
+    dut.key_only_mode.value  = 1
+    await ClockCycles(dut.clk, 2)
+
+    mismatches = []
+
+    # Round 0: addRoundKeyOut must equal w[0..3] directly (first 4 of 6 master key words)
+    ark_r0 = int(dut.addRoundKeyOut.value)
+    dut._log.info("Round 0: verifying addRoundKeyOut == master key words (no state XOR)")
+    for wi in range(4):
+        rtl_word  = get_state_word(ark_r0, wi)
+        nist_word = ref.w[wi]
+        match = "PASS" if rtl_word == nist_word else "FAIL"
+        if rtl_word != nist_word:
+            mismatches.append(f"Round 0 w[{wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+        dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    dut._log.info("=== ROUNDS 1-12: key_only_mode addRoundKeyOut vs NIST ===")
+    for rnd in range(1, Nr + 1):
+        is_bypass = (rnd % 3 == 2)
+        dut._log.info(f"--- Round {rnd} {'(BYPASS)' if is_bypass else '(COMPUTE)'} ---")
+        dut.round_num.value = rnd
+        await RisingEdge(dut.clk)
+
+        if is_bypass:
+            dut._log.info("  Bypass round — sbox_enb_n=2'b11")
+            await RisingEdge(dut.clk)
+        else:
+            cyc = await wait_sbox_done(dut)
+            dut._log.info(f"  Compute round — sbox_done after {cyc} cycles")
+            await RisingEdge(dut.clk)
+
+        # addRoundKeyOut in key_only_mode always carries the 4 words the
+        # cipher consumes for this round, i.e. NIST w[4*rnd..4*rnd+3] --
+        # unlike prev_expKey (a 6-word rolling batch), this is round-indexed
+        # directly, matching expected_ark_rtl_int()'s round convention.
+        ark_out  = int(dut.addRoundKeyOut.value)
+        nist_rk  = ref.get_round_key_words(rnd)
+
+        for wi in range(4):
+            rtl_word  = get_state_word(ark_out, wi)
+            nist_word = nist_rk[wi]
+            match = "PASS" if rtl_word == nist_word else "FAIL"
+            if rtl_word != nist_word:
+                mismatches.append(f"Round {rnd} w[{4*rnd+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+            dut._log.info(f"  w[{4*rnd+wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    dut._log.info("\n" + "=" * 60)
+    if mismatches:
+        dut._log.warning(f"TC18: {len(mismatches)} mismatch(es) found:")
+        for m in mismatches:
+            dut._log.warning(f"  {m}")
+        assert False, f"TC18 FAILED: {len(mismatches)} key_only_mode mismatches"
+
+    dut._log.info("TC18 PASSED — AES-192 key_only_mode gives raw expanded key, unaffected by state")
+    dut._log.info("=" * 60)
+
+
+# TC19: AES-256 key_only_mode — addRoundKeyOut carries the expanded key alone
+@cocotb.test()
+async def tc19_aes256_key_only_mode(dut):
+    """TC19: AES-256 with key_only_mode=1 — addRoundKeyOut must equal the raw
+    expanded-key words directly, including through round 1's bypass (upper
+    half of the master key, no SubWord/RCON), with `state` held at a nonzero
+    garbage pattern throughout.
+    """
+    dut._log.info("=" * 60)
+    dut._log.info("TC19: AES-256 key_only_mode (14 rounds)")
+    dut._log.info("=" * 60)
+
+    start_clocks(dut)
+    cocotb.start_soon(noise_driver(dut))
+    await reset_dut(dut)
+    cocotb.start_soon(signal_monitor(dut, label="TC19"))
+
+    key_bytes = bytes.fromhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dfe4")
+    Nk, Nr = 8, 14
+    ref = AESReferenceModel(key_bytes)
+    ref.dump_key_schedule(dut._log.info)
+
+    garbage_state  = plaintext_to_rtl_state(list(range(0xF0, 0xE0, -1)))
+    master_key_int = ref.master_key_rtl_int()
+
+    dut.round_num.value      = 0
+    dut.key_size.value       = KEY_SIZE_256
+    dut.state.value          = garbage_state
+    dut.master_key.value     = master_key_int
+    dut.key_only_mode.value  = 1
+    await ClockCycles(dut.clk, 2)
+
+    mismatches = []
+
+    # Round 0: addRoundKeyOut must equal w[0..3] directly (first 4 of 8 master key words)
+    ark_r0 = int(dut.addRoundKeyOut.value)
+    dut._log.info("Round 0: verifying addRoundKeyOut == master key words (no state XOR)")
+    for wi in range(4):
+        rtl_word  = get_state_word(ark_r0, wi)
+        nist_word = ref.w[wi]
+        match = "PASS" if rtl_word == nist_word else "FAIL"
+        if rtl_word != nist_word:
+            mismatches.append(f"Round 0 w[{wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+        dut._log.info(f"  w[{wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    dut._log.info("=== ROUNDS 1-14: key_only_mode addRoundKeyOut vs NIST ===")
+    for rnd in range(1, Nr + 1):
+        parity = "even" if rnd % 2 == 0 else "odd"
+        is_bypass = (rnd == 1)  # w[4..7] = master key upper half, no SubWord/RCON needed
+        dut._log.info(f"--- Round {rnd} ({parity}){' [BYPASS]' if is_bypass else ''} ---")
+        dut.round_num.value = rnd
+
+        if is_bypass:
+            await RisingEdge(dut.clk)
+            await RisingEdge(dut.clk)
+            dut._log.info("  Bypass round: sbox disabled (w[4..7] = master key upper half)")
+        else:
+            cyc = await wait_sbox_done(dut)
+            dut._log.info(f"  sbox_done after {cyc} cycles")
+            await RisingEdge(dut.clk)
+
+        ark_out = int(dut.addRoundKeyOut.value)
+        nist_rk = ref.get_round_key_words(rnd)
+
+        for wi in range(4):
+            rtl_word  = get_state_word(ark_out, wi)
+            nist_word = nist_rk[wi]
+            match = "PASS" if rtl_word == nist_word else "FAIL"
+            if rtl_word != nist_word:
+                mismatches.append(f"Round {rnd} w[{4*rnd+wi}]: RTL=0x{rtl_word:08x} vs NIST=0x{nist_word:08x}")
+            dut._log.info(f"  w[{4*rnd+wi}]: RTL=0x{rtl_word:08x}  NIST=0x{nist_word:08x}  {match}")
+
+    dut._log.info("\n" + "=" * 60)
+    if mismatches:
+        dut._log.warning(f"TC19: {len(mismatches)} mismatch(es) found:")
+        for m in mismatches:
+            dut._log.warning(f"  {m}")
+        assert False, f"TC19 FAILED: {len(mismatches)} key_only_mode mismatches"
+
+    dut._log.info("TC19 PASSED — AES-256 key_only_mode gives raw expanded key, unaffected by state")
     dut._log.info("=" * 60)
