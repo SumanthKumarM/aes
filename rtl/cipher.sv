@@ -2,47 +2,41 @@
  * This is the CIPHER block which instantiates Sbox, ShiftRows, MixColumns and AddRoundKey as sub-modules where input plain-text undergoes all these transformations
  * This block receives a total of 1680 random bits from TRNG which goes to Sbox internally
  * CIPHER has no direct handshake with TRNG but governs TRNG - SBox local handshake. Handshake between TRNG and SBox only happens when CIPHER enables Sbox
+ * CIPHER manages the SBox and AddRoundKey while having them at same level as CIPHER in module hierarchy as SBox and AddRoundKey are common to both CIPHER and inverse CIPHER
 **/
 
 import type_defs_pkg::*;
 
 module cipher(
     output state_matrix_t cipher_state,  // state matrix that has gone through whole CIPHER algorithm
+    output unibble round_cntr,  // keeps track of CIPHER round count
     output logic cipher_done,  // becomes high when CIPHER is done computing transformed state
-    output logic sbox_ready,  // sbox acknowledges receiption of random words
-    output logic rst_trng,  // resets TRNG when health test results in fatal failures
+    output state_matrix_t ark_state,  // input state to addRoundKey
+    output u128_t sbox_state,  // input state matrix to SBox
+    output logic [1:0] sbox_enb_n,  // SBox enable signal
+    output logic sbox_proceed,  // signal from CIPHER to SBox to advance to next state only when CIPHER has aknowledged
+    output logic ark_enb_n,  // addRoundKey enable signal
     input state_matrix_t state,  // input state matrix (plain text)
-    input logic [1679:0] rand_num,  // 1680-bit random bits from TRNG
     input logic [255:0] master_key,  // MASTER KEY required for key expansion
+    input u128_t subBytes,  // subBytes computed by Sbox for given state matrix
+    input state_matrix_t addRoundKeyOut,  // output of AddRoundKey module
+    input word_t ark_sbox_word,  // generated KEY from AddRundKey to SBox
+    input logic [1:0] ark_sbox_enb_n,  // AddRoundKey enabling sbox
     input logic [1:0] key_size,  // AES KEY size from CONTROL register
-    input logic trng_key_valid,  // tells S-box that random words are ready
-    input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
+    input logic sbox_done_pulse,  // signal from SBox which becomes high when Sbox is done computing sbuBytes
+    input logic ark_done,  // indicates that addRoundKey has computed the output
     input logic rst_n, clk);
     
     state_matrix_t temp_state;
     unibble Nr;  // number of CIPHER rounds based on KEY size
-    unibble round_cntr;  // keeps track of CIPHER round count
-    logic [1:0] sbox_enb_n;  // SBox enable signal
-    logic [1:0] ark_sbox_enb_n;  // AddRoundKey enabling sbox
-    logic sbox_done_pulse;  // signal from SBox which becomes high when Sbox is done computing sbuBytes
-    logic sbox_proceed;  // signal from CIPHER/AddRoundKey to SBox to advance to next state only when CIPHER/AddRoundKey has aknowledged
-    logic ark_enb_n;  // addRoundKey enable signal
-    logic ark_done;  // indicates that addRoundKey has computed the output
-    logic [127:0] sbox_state;  // state matrix to SBox
-    logic [127:0] subBytes;  // subBytes computed by Sbox for given state matrix
     state_matrix_t subBytes_matrix;  // matrix version of subBytes
     state_matrix_t shift_rows;  // stores state that has gone through shiftRows
     state_matrix_t mix_columns;  // stores state that has gone through mixColumns
-    word_t ark_sbox_word;  // generated KEY from AddROundKey to SBox
-    state_matrix_t ark_state;  // input state to addRoundKey
-    state_matrix_t addRoundKeyOut;  // output of AddRoundKey module
     cipher_internal_states fsm_state;
 
     // sub-module instances
-    sbox SBox(subBytes, sbox_ready, sbox_done_pulse, rst_trng, trng_dead_flag, sbox_state, rand_num, trng_key_valid, sbox_proceed, sbox_enb_n[1], sbox_enb_n[0], rst_n, clk); 
     shiftRows ShiftRows(shift_rows, subBytes_matrix);
     mixColumns MixColumns(mix_columns, shift_rows);
-    addRoundKey AddRoundKey(addRoundKeyOut, ark_done, ark_sbox_word, ark_sbox_enb_n, ark_state, master_key, subBytes[31:0], round_cntr, key_size, sbox_done_pulse, ark_enb_n, rst_n, clk);
 
     always_comb begin
         // number of total CIPHER rounds (Nr) based on KEY size
