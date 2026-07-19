@@ -42,12 +42,10 @@ module cipher(
 
     always_comb begin
         // number of total CIPHER rounds (Nr) based on KEY size
-        case(key_size)
-            2'b01: Nr = 4'hA;
-            2'b10: Nr = 4'hC;
-            2'b11: Nr = 4'hE;
-            default: Nr = 4'h0;
-        endcase
+        //   KEY size = 01 (AES-128): Nr = 10
+        //   KEY size = 10 (AES-192): Nr = 12
+        //   KEY size = 11 (AES-256): Nr = 14
+        Nr = {(key_size[1] | key_size[0]), key_size[1], key_size[0], 1'b0};
 
         // rerouting subBytes to subBytes_matrix as both of them in different formats
         for(int i=0; i<16; i++)
