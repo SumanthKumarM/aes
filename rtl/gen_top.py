@@ -112,10 +112,7 @@ module addRoundKey_top (
     logic trng_dead_flag;  // TRNG has encountered fatal error
     logic rst_trng;  // S-box resets TRNG if it encounters a fatal error
     logic trng_rst;  // combined reset driven into TRNG
-    // AddRoundKey is the only caller of this Sbox instance, so it can proceed
-    // as soon as it has consumed the result -- ark_done directly acknowledges
-    // sbox_done_pulse with no separate ack register needed.
-    logic sbox_proceed;
+    logic sbox_proceed;  // proceed signal from AddRoundKey to SBox
 
     // width adapters: the sbox state/subBytes ports are 128-bit, but the
     // KeyExpansion path only ever uses the low 32 bits (word mode)
@@ -125,7 +122,6 @@ module addRoundKey_top (
     assign trng_rst = rst_n & rst_trng;
     assign sbox_state_ext = {96'd0, sbox_state};
     assign subByte = subBytes_full[31:0];
-    assign sbox_proceed = ark_done;
 
     trng TRNG(
         .rand_word(rand_num),
@@ -157,6 +153,7 @@ module addRoundKey_top (
         .ark_done(ark_done),
         .sbox_state(sbox_state),
         .sbox_enb_n(sbox_enb_n),
+        .sbox_proceed(sbox_proceed),
         .state(state),
         .master_key(master_key),
         .subByte(subByte),
@@ -201,6 +198,7 @@ module cipher_top(
     word_t ark_sbox_word;  // generated KEY word from AddRoundKey sent to SBox
     logic sbox_done_pulse;  // Sbox has computed the requested SubBytes/subWord
     logic sbox_ready;  // tells TRNG that Sbox is ready to accept random bits
+    logic ark_sbox_proceed;  // AddRoundKey acknowledges and let's SBox advance to next state
 
     // TRNG connections
     logic rst_trng;  // resets TRNG when health test results in fatal failures
@@ -230,7 +228,7 @@ module cipher_top(
         .state(sbox_state),
         .rand_num(rand_num),
         .trng_key_valid(trng_key_valid),
-        .proceed(sbox_proceed),
+        .proceed(sbox_proceed | ark_sbox_proceed),
         .enb_n(sbox_enb_n[1]),
         ._enb_n(sbox_enb_n[0]),
         .rst_n(rst_n),
@@ -241,6 +239,7 @@ module cipher_top(
         .ark_done(ark_done),
         .sbox_state(ark_sbox_word),
         .sbox_enb_n(ark_sbox_enb_n),
+        .sbox_proceed(ark_sbox_proceed),
         .state(ark_state),
         .master_key(master_key),
         .subByte(subBytes[31:0]),

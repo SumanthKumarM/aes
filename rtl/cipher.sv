@@ -36,7 +36,7 @@ module cipher(
     cipher_internal_states fsm_state;
 
     // sub-module instances
-    icg ICG(gated_clk, ~enb_n, clk);  // ICG cell to reduce dynamic power consumption
+    icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
     shiftRows ShiftRows(shift_rows, subBytes_matrix);
     mixColumns MixColumns(mix_columns, shift_rows);
 
@@ -113,6 +113,7 @@ module cipher(
                         end 
                         ADDROUNDKEY: begin
                             sbox_enb_n <= ark_sbox_enb_n;  // AddRoundKey decides when to enable/disable SBox
+                            sbox_proceed <= 0;  // this is ignore as AddRoundKey itself will set this signal
 
                             // AddRoundKey is disabled when it has computed the output to protect it from using stale previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
                             ark_enb_n <= (ark_done) ? 1 : 0;
@@ -135,12 +136,10 @@ module cipher(
                                     round_cntr <= round_cntr + 1;  // updating CIPHER counter as state has been updated
                                 end
 
-                                sbox_proceed <= 1;  // AddRoundKey will allow SBox to advance to next state only when SBox has computed subBytes
                                 fsm_state <= PRE_ADDROUNDKEY;
                             end
                             else begin 
                                 cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                                sbox_proceed <= 0;
                                 round_cntr <= round_cntr;
                                 fsm_state <= ADDROUNDKEY;
                             end
