@@ -17,7 +17,7 @@ module cipher(
     output logic sbox_proceed,  // signal from CIPHER to SBox to advance to next state only when CIPHER has aknowledged
     output logic ark_enb_n,  // addRoundKey enable signal
     input state_matrix_t state,  // input state matrix (plain text)
-    input logic [255:0] master_key,  // MASTER KEY required for key expansion
+    input u256_t master_key,  // MASTER KEY required for key expansion
     input u128_t subBytes,  // subBytes computed by Sbox for given state matrix
     input state_matrix_t addRoundKeyOut,  // output of AddRoundKey module
     input word_t ark_sbox_word,  // generated KEY from AddRundKey to SBox

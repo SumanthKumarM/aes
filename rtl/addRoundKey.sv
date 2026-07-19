@@ -17,7 +17,7 @@ module addRoundKey(
     output word_t sbox_state,  // rotated version of generated KEY is sent to SBox as input
     output logic [1:0] sbox_enb_n,  // enable signal which enables or disables only a portion of SBox
     input state_matrix_t state,  // input state matrix
-    input logic [255:0] master_key,  // input master KEY
+    input u256_t master_key,  // input master KEY
     input word_t subByte,  // subBytes computed by SBox is taken as input
     input unibble round_num,  // input CIPHER which indicates number of AES rounds
     input logic [1:0] key_size,  // input from CONTROL register specifying the KEY size
