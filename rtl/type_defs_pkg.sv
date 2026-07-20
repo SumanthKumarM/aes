@@ -50,7 +50,7 @@ package type_defs_pkg;
     } cipher_internal_states;
 
     typedef enum logic {
-        INVC_PRE_ADDROUNDKEY,
-        INVC_ADDROUNDKEY
+        PRE_INVADDROUNDKEY,
+        INVADDROUNDKEY
     } invCipher_internal_states;
 endpackage

@@ -10,17 +10,16 @@ import type_defs_pkg::*;
 module invCipher(
     output state_matrix_t invCipher_state,  // state matrix that has gone through whole invCIPHER algorithm
     output logic invCipher_done,  // becomes high when invCIPHER is done computing transformed state
-    output logic internal_state,  // state in which invCipher is currently operating in
-    output state_matrix_t ark_state_in,  // input state to AddRoundKey from invSbox
-    output logic ark_enb_n,  // enable signal to AddRoundKey
-    output unibble ark_round_num,  // invCIPHER round number output to AddRoundKey
+    output unibble ark_round_num,  // this counter drives AddRoundKey to give corresponding KEY
+    output logic ark_enb_n,  // enable signal for AddRoundKey
     output logic invSbox_ready,  // tells TRNG that invSbox is ready to accept random bits
     output logic rst_trng,  // resets TRNG when health test results in fatal failures
     input state_matrix_t state,  // input state matrix (encrypted text)
     input logic [1343:0] rand_num,  // 1344 random bits from TRNG to invSbox
-    input state_matrix_t ark_state_out,  // output of AddRoundKey
-    input logic ark_done,  // signal from AddRoundKey which is asserted when AddRoundKey has computed the output
+    input u256_t master_key,  // input master KEY
     input logic [1:0] key_size,  // AES KEY size to decide number of rounds
+    input state_matrix_t exp_key,  // expanded KEY from AddRoundKey
+    input logic ark_done,  // signal from AddRoundKey which indicates that AddRoundKey has computed required KEY
     input logic trng_key_valid,  // tells invSbox that random words are ready
     input logic trng_dead_flag,  // asserted by TRNG to signify that it has encountered fatal failure
     input enb_n,  // active low enable signal for invCipher
@@ -31,6 +30,11 @@ module invCipher(
     logic delay;  // used to cause 1-clk cycle delay during which round_cntr can be updated
     unibble Nr;  // number of invCIPHER rounds based on KEY size
     unibble round_cntr;  // keeps track of invCIPHER round count
+    state_matrix_t invARK_state_in;  // input state matrix to invAddRoundKey
+    logic invARK_enb_n;  // enable signal to invAddRoundKey
+    logic invARK_proceed;  // asserted when invCIPHER consumes all added KEYs
+    state_matrix_t invAddRoundKeyOut;  // output of invAddRoundKey
+    logic invARK_done;  // lets invCIPHER know when to consume invAddRoundKey's output
     u128_t invSbox_state;  // 128-bit input state matrix to invSbox
     u128_t invSubBytes;  // invSubByte of each encrypted element of state array
     logic invSbox_done_pulse;  // indicates that invSbox has computed required invSubBytes
@@ -45,19 +49,15 @@ module invCipher(
     icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
     invShiftRows InvShiftRows(invsr_state_out, invsr_state_in);
     invSbox InvSBox(invSubBytes, invSbox_ready, invSbox_done_pulse, rst_trng, invSbox_state, rand_num, trng_dead_flag, trng_key_valid, invSbox_proceed, invSbox_enb_n, rst_n, clk);
-    invMixColumns InvMixColumns(invmc_state_out, ark_state_out);
+    invMixColumns InvMixColumns(invmc_state_out, invAddRoundKeyOut);
+    invAddRoundKey InvAddRoundKey(invAddRoundKeyOut, ark_round_num, invARK_done, ark_enb_n, exp_key, master_key, key_size, round_cntr, invARK_state_in, ark_done, invARK_enb_n, rst_n, clk);
 
     always_comb begin
-        internal_state = fsm_state;
-
         // number of total CIPHER rounds (Nr) based on KEY size
         //   KEY size = 01 (AES-128): Nr = 10
         //   KEY size = 10 (AES-192): Nr = 12
         //   KEY size = 11 (AES-256): Nr = 14
         Nr = {(key_size[1] | key_size[0]), key_size[1], key_size[0], 1'b0};
-
-        // invCIPHER counts round number from Nr down to 0 but AddRoundKey requires it from 0 to Nr so mapping it accordingly
-        ark_round_num = Nr - round_cntr;
 
         // rerouting invsr_state_out to invSbox_state as both of them are in different formats
         for(int i=0; i<16; i++)
@@ -85,70 +85,70 @@ module invCipher(
         if(!rst_n) begin
             delay <= 0;
             round_cntr <= 0;
-            ark_enb_n <= 1;
+            invARK_enb_n <= 1;
             invSbox_enb_n <= 1;
             invSbox_proceed <= 0;
             invCipher_done <= 0;
-            fsm_state <= INVC_PRE_ADDROUNDKEY;
+            fsm_state <= PRE_INVADDROUNDKEY;
 
             for(int i=0; i<16; i++) begin
                 invCipher_state[i%4][i/4] <= 8'h00;
                 temp_state[i%4][i/4] <= 8'h00;
                 invsr_state_in[i%4][i/4] <= 8'h00;
-                ark_state_in[i%4][i/4] <= 8'h00;
+                invARK_state_in[i%4][i/4] <= 8'h00;
             end
         end
         else begin  // (for round from Nr − 1 downto 1 do ... end for) & last round
             // key_size isn't set until reset is released so round_cntr needs another cycle to actually get correct Nr value
             if(!enb_n && !delay) begin
                 round_cntr <= Nr;
-                ark_enb_n <= 1;
+                invARK_enb_n <= 1;
                 invSbox_enb_n <= 1;
                 invSbox_proceed <= 0;
                 invCipher_done <= 0;
-                fsm_state <= INVC_PRE_ADDROUNDKEY;
+                fsm_state <= PRE_INVADDROUNDKEY;
 
                 for(int i=0; i<16; i++) begin
                     invCipher_state[i%4][i/4] <= 8'h00;
                     temp_state[i%4][i/4] <= 8'h00;
                     invsr_state_in[i%4][i/4] <= 8'h00;
-                    ark_state_in[i%4][i/4] <= 8'h00;
+                    invARK_state_in[i%4][i/4] <= 8'h00;
                 end
             end
             else if(!enb_n && delay) begin  // invCipher is enabled
                 if(round_cntr == Nr) begin  // only AddRoundKey is performed in this invCipher round
                     invSbox_enb_n <= 1;  // invSbox is not required yet
                     invSbox_proceed <= 0;
-                    ark_enb_n <= 0;  // AddROundKey is enabled
-                    ark_state_in <= state;  // loading input of AddRoundKey
-                    temp_state <= (ark_done) ? ark_state_out : temp_state;
-                    round_cntr <= (ark_done) ? (Nr - 1) : round_cntr;
+                    invARK_enb_n <= 0;  // invAddRoundKey is enabled
+                    invARK_state_in <= state;  // loading input of AddRoundKey
+                    temp_state <= (invARK_done) ? invAddRoundKeyOut : temp_state;
+                    round_cntr <= (invARK_done) ? (Nr - 1) : round_cntr;
                     invCipher_done <= 0;  // invCipher is not done computing transformed state yet
-                    fsm_state <= INVC_PRE_ADDROUNDKEY;
+                    fsm_state <= PRE_INVADDROUNDKEY;
                 end
                 else begin
                     case(fsm_state)
-                        INVC_PRE_ADDROUNDKEY: begin
+                        PRE_INVADDROUNDKEY: begin
                             invSbox_enb_n <= 0;  // enabling invSbox as it's required to compute invSubBytes
-                            ark_enb_n <= 1;
+                            invARK_enb_n <= 1;
                             invCipher_done <= 0;
                             invsr_state_in <= temp_state;  // loading input of invShiftRows
                             temp_state <= (invSbox_done_pulse) ? invSubBytes : temp_state;
                             invSbox_proceed <= invSbox_done_pulse;  // invCIPHER will allow invSbox to advance to next state only when invSbox has computed invSubBytes
-                            fsm_state <= (invSbox_done_pulse) ? INVC_ADDROUNDKEY : INVC_PRE_ADDROUNDKEY;
+                            fsm_state <= (invSbox_done_pulse) ? INVADDROUNDKEY : PRE_INVADDROUNDKEY;
                         end 
-                        INVC_ADDROUNDKEY: begin
+                        INVADDROUNDKEY: begin
                             invSbox_enb_n <= 1;  // disabled invSbox since it's not required here
                             invSbox_proceed <= 0;
 
-                            // AddRoundKey is disabled when it has computed the output to protect it from using stale previous cycle output when it enters 'if(round_cntr == Nr) or INVC_PRE_ADDROUNDKEY'
-                            ark_enb_n <= (ark_done) ? 1 : 0;
-                            ark_state_in <= temp_state;  // loading AddRounKey input with invSubBytes
+                            // invAddRoundKey is disabled when it has computed the output to protect it from using stale previous cycle output when it enters 'if(round_cntr == Nr) or PRE_INVADDROUNDKEY'
+                            invARK_enb_n <= invARK_done;
+                            invARK_state_in <= temp_state;  // loading AddRounKey input with invSubBytes
 
-                            if(ark_done) begin
+                            if(invARK_done) begin
                                 if(round_cntr == 0) begin
-                                    temp_state <= ark_state_out;
-                                    invCipher_state <= ark_state_out;
+                                    temp_state <= invAddRoundKeyOut;
+                                    invCipher_state <= invAddRoundKeyOut;
                                     invCipher_done <= 1;
                                     round_cntr <= Nr;
                                 end
@@ -158,11 +158,11 @@ module invCipher(
                                     round_cntr <= round_cntr - 1;
                                 end
 
-                                fsm_state <= INVC_PRE_ADDROUNDKEY;
+                                fsm_state <= PRE_INVADDROUNDKEY;
                             end
                             else begin
                                 invCipher_done <= 0;
-                                fsm_state <= INVC_ADDROUNDKEY;
+                                fsm_state <= INVADDROUNDKEY;
                             end
                         end
                     endcase
@@ -170,7 +170,7 @@ module invCipher(
             end
             else begin  // invCipher is disabled
                 round_cntr <= round_cntr;
-                ark_enb_n <= 1;
+                invARK_enb_n <= 1;
                 invSbox_enb_n <= 1;
                 invSbox_proceed <= 0;
                 invCipher_done <= 0;
@@ -178,7 +178,7 @@ module invCipher(
                 invCipher_state <= invCipher_state;
                 temp_state <= temp_state;
                 invsr_state_in <= invsr_state_in;
-                ark_state_in <= ark_state_in;
+                invARK_state_in <= invARK_state_in;
             end
 
             delay <= ~enb_n;  // this helps to create a cycle gap so round_cntr can be updated

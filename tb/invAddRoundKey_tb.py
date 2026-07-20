@@ -10,10 +10,25 @@ invAddRoundKey operation (two phases, per the RTL's design intent):
      which is stored into key_mem slot r. When round_cntr reaches Nr and the
      last key lands, keys_received latches 1 and AddRoundKey is disabled.
   2. INVERSE KEY ADDITION: with keys_received=1, every enabled clock cycle
-     registers invAddRoundKeyOut = state ^ key_mem[invCipher_round]. The
-     caller (inverse CIPHER) supplies invCipher_round already mapped to the
-     NIST key index it wants -- backward iteration is the caller's job, so
-     this TB exercises rounds in descending order the way invCipher would.
+     registers invAddRoundKeyOut = state ^ key_mem[invCipher_round], and
+     invARK_done stays high for the whole phase (invCipher gates its own
+     invARK_enb_n directly off invARK_done -- no separate proceed handshake).
+     The caller (inverse CIPHER) supplies invCipher_round already mapped to
+     the NIST key index it wants -- backward iteration is the caller's job,
+     so this TB exercises rounds in descending order the way invCipher would.
+
+  Critical timing constraint (invAddRoundKey.sv:78): keys_received's reset
+  back to 0 is gated by `invCipher_round == 0`, not by an explicit "done"
+  handshake -- so invCipher_round MUST already read Nr on the very first
+  cycle the addition phase evaluates it (the cycle keys_received first
+  becomes visible as 1), otherwise that cycle sees invCipher_round==0 and
+  immediately schedules keys_received back to 0, undoing acquisition before
+  the TB ever gets to drive a real round. This is exactly what invCipher.sv
+  guarantees in real usage: it holds round_cntr at Nr for a whole extra
+  "delay" cycle before ever enabling invAddRoundKey, so invAddRoundKey's
+  first read of invCipher_round in the addition branch is always Nr, never
+  0. start_key_load() below presets invCipher_round to Nr for the same
+  reason, matching that guarantee instead of leaving it at its reset value.
 
 Golden reference: NIST FIPS 197 key schedule (AESReferenceModel, same
 conventions as addRoundKey_tb.py, which is regression-proven 19/19). Expected
@@ -40,11 +55,11 @@ RTL data representation (same conventions addRoundKey_tb validated):
     hold NIST w[4r..4r+3] (RTL row 3 = MSByte of the word).
 
 Signal access notes (Verilator, --public-flat-rw):
-  - dut.invAddRoundKeyOut, dut.round_cntr, dut.ark_enb_n, dut.ark_done,
-    dut.sbox_enb_n -- top-level ports
+  - dut.invAddRoundKeyOut, dut.round_cntr, dut.invARK_done, dut.ark_enb_n,
+    dut.ark_done, dut.sbox_enb_n -- top-level ports
   - dut.InvAddRoundKey.keys_received, dut.InvAddRoundKey.key_mem -- internal
     (note the instance name casing: InvAddRoundKey). TRNG/SBox-side debug
-    signals (rand_num, keys_rx_done, subByte, sbox_state, sbox_ready,
+    signals (rand_num, subByte, sbox_state, sbox_ready,
     sbox_done_pulse, trng_key_valid) are internal wires in invAddRoundKey_top,
     not top-level ports -- this testbench doesn't drive/read them directly, so
     reach them via dut.SBox.*/dut.TRNG.* if ever needed.
@@ -242,7 +257,6 @@ async def reset_dut(dut):
     dut.master_key.value      = 0
     dut.state.value           = 0
     dut.invCipher_round.value = 0
-    dut.invARK_proceed.value  = 0
     dut.raw_rand_bit.value    = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
     dut.rst_n.value = 1
@@ -250,10 +264,19 @@ async def reset_dut(dut):
     dut._log.info("DUT reset complete (parked: enb_n=1)")
 
 async def start_key_load(dut, ref, key_size_code):
-    """Drive master_key/key_size and enable the DUT so key acquisition starts."""
-    dut.master_key.value = ref.master_key_rtl_int()
-    dut.key_size.value   = key_size_code
-    dut.enb_n.value      = 0
+    """Drive master_key/key_size and enable the DUT so key acquisition starts.
+
+    invCipher_round is preset to Nr here (not left at reset's 0) to mirror
+    invCipher.sv's real guarantee: by the time it first enables invAddRoundKey
+    in the addition phase, round_cntr already reads Nr. Without this, this
+    standalone DUT would see invCipher_round==0 on the very cycle
+    keys_received first becomes visible, tripping the `invCipher_round == 0`
+    reset check at invAddRoundKey.sv:78 and undoing acquisition before the TB
+    ever gets to drive a real round (see module docstring above)."""
+    dut.master_key.value      = ref.master_key_rtl_int()
+    dut.key_size.value        = key_size_code
+    dut.invCipher_round.value = ref.Nr
+    dut.enb_n.value           = 0
     await RisingEdge(dut.clk)
 
 async def wait_keys_received(dut, timeout=LOAD_TIMEOUT):
@@ -549,7 +572,15 @@ async def tc6_enable_gating(dut):
 # TC7: random-state stress (AES-128)
 @cocotb.test()
 async def tc7_random_stress_aes128(dut):
-    """TC7: 24 random (state, round) pairs against the NIST model, AES-128."""
+    """TC7: 24 random (state, round) pairs against the NIST model, AES-128.
+
+    Rounds are drawn from 1..Nr, excluding round 0: per invAddRoundKey.sv:78,
+    keys_received's return to 0 (and hence the addition phase ending) is
+    gated purely on invCipher_round==0, with no separate completion signal.
+    Hitting round 0 anywhere but the last entry of a sequence would end the
+    addition phase mid-stress and silently kick the DUT back into key
+    re-acquisition for the remaining draws. Round 0 itself is already
+    exercised as the deliberate last entry of TC3/4/5's full Nr..0 sweeps."""
     dut._log.info("=" * 60)
     dut._log.info("TC7: Random-state stress, AES-128")
     dut._log.info("=" * 60)
@@ -567,7 +598,7 @@ async def tc7_random_stress_aes128(dut):
     await start_key_load(dut, ref, KEY_SIZE_128)
     await wait_keys_received(dut)
 
-    rounds = [rng.randrange(0, ref.Nr + 1) for _ in range(24)]
+    rounds = [rng.randrange(1, ref.Nr + 1) for _ in range(24)]
     mismatches = await check_inverse_rounds(dut, ref, rng, rounds=rounds)
     if mismatches:
         assert False, f"TC7 FAILED ({len(mismatches)} mismatches):\n" + "\n".join(mismatches)

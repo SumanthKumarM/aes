@@ -333,7 +333,6 @@ import type_defs_pkg::*;
 module invCipher_top(
     output state_matrix_t invCipher_state,  // state matrix that has gone through whole invCIPHER algorithm
     output logic invCipher_done,  // becomes high when invCIPHER is done computing transformed state
-    output logic internal_state,  // internal state of invCipher
     output logic [1679:0] rand_num,  // random data from TRNG
     output logic invSbox_ready,  // tells TRNG that invSbox is ready to accept random bits
     output logic trng_key_valid,  // TRNG: data is valid
@@ -345,8 +344,9 @@ module invCipher_top(
     input logic enb_n,  // active low enable signal for invCipher
     input logic rst_n, sampling_clk, clk);
 
-    // invCipher <-> addRoundKey connections
-    state_matrix_t ark_state_in;  // input state to AddRoundKey from invSbox
+    // invCipher <-> addRoundKey connections (KeyExpansion path only -- invCipher
+    // now instantiates invAddRoundKey internally, so this external addRoundKey
+    // instance solely feeds it expanded KEY words via exp_key/ark_done/ark_enb_n/ark_round_num)
     state_matrix_t addRoundKeyOut;  // output of addRoundKey back to invCipher
     unibble ark_round_num;  // invCIPHER round number (already mapped 0..Nr) to AddRoundKey
     logic ark_enb_n;  // enable signal to AddRoundKey
@@ -357,6 +357,7 @@ module invCipher_top(
     logic sbox_ready;  // unused in word mode (no TRNG handshake), observed only
     logic sbox_done_pulse;  // Sbox has computed the requested subBytes word
     logic sbox_proceed;  // acknowledges sbox_done_pulse so Sbox can advance
+    logic ark_sbox_proceed;  // AddRoundKey's own proceed output (same wiring as cipher_top's shared-sbox pattern)
     word_t ark_sbox_state;  // rotated version of generated KEY sent to SBox
 
     // width adapters: the sbox state/subBytes ports are 128-bit, but the
@@ -404,7 +405,7 @@ module invCipher_top(
         .state(sbox_state_ext),
         .rand_num(sbox_rand_num),
         .trng_key_valid(1'b0),
-        .proceed(sbox_proceed),
+        .proceed(sbox_proceed | ark_sbox_proceed),
         .enb_n(sbox_enb_n[1]),
         ._enb_n(sbox_enb_n[0]),
         .rst_n(rst_n),
@@ -415,11 +416,13 @@ module invCipher_top(
         .ark_done(ark_done),
         .sbox_state(ark_sbox_state),
         .sbox_enb_n(sbox_enb_n),
-        .state(ark_state_in),
+        .sbox_proceed(ark_sbox_proceed),
+        .state(128'd0),  // unused: key_only_mode=1 bypasses the state XOR
         .master_key(master_key),
         .subByte(subByte),
         .round_num(ark_round_num),
         .key_size(key_size),
+        .key_only_mode(1'b1),  // this AddRoundKey only feeds invAddRoundKey's exp_key -- raw expanded KEY only
         .sbox_done(sbox_done_pulse),
         .enb_n(ark_enb_n),
         .rst_n(rst_n),
@@ -428,16 +431,15 @@ module invCipher_top(
     invCipher InvCipher(
         .invCipher_state(invCipher_state),
         .invCipher_done(invCipher_done),
-        .internal_state(internal_state),
-        .ark_state_in(ark_state_in),
-        .ark_enb_n(ark_enb_n),
         .ark_round_num(ark_round_num),
+        .ark_enb_n(ark_enb_n),
         .invSbox_ready(invSbox_ready),
         .rst_trng(invSbox_rst_trng),
         .state(state),
         .rand_num(invSbox_rand_num),
-        .ark_state_out(addRoundKeyOut),
+        .exp_key(addRoundKeyOut),
         .ark_done(ark_done),
+        .master_key(master_key),
         .key_size(key_size),
         .trng_key_valid(trng_key_valid),
         .trng_dead_flag(trng_dead_flag),
@@ -453,12 +455,11 @@ import type_defs_pkg::*;
 module invAddRoundKey_top(
     output state_matrix_t invAddRoundKeyOut,  // output of invAddRoundKey
     output unibble round_cntr,  // which round's KEY invAddRoundKey is currently loading/using
-    output logic keys_rx_done,  // lets invCIPHER know when to start use invAddRoundKey's output
+    output logic invARK_done,  // stays high through the addition phase; lets invCIPHER gate invARK_enb_n directly
     input u256_t master_key,  // input master KEY
     input logic [1:0] key_size,  // AES KEY size
     input unibble invCipher_round,  // this is the current inverse CIPHER round value
     input state_matrix_t state,  // input state matrix
-    input logic invARK_proceed,  // asserted by invCIPHER when invCIPHER consumes all added KEYs from this block
     input logic raw_rand_bit,  // raw random bit from noise source
     input logic sampling_clk,  // high frequency independent clock for noise source
     input logic enb_n,  // invAddRoundKey enable signal
@@ -540,13 +541,12 @@ module invAddRoundKey_top(
     invAddRoundKey InvAddRoundKey(
         .invAddRoundKeyOut(invAddRoundKeyOut),
         .round_cntr(round_cntr),
-        .keys_rx_done(keys_rx_done),
+        .invARK_done(invARK_done),
         .ark_enb_n(ark_enb_n),
         .exp_key(addRoundKeyOut),
         .master_key(master_key),
         .key_size(key_size),
         .invCipher_round(invCipher_round),
-        .invARK_proceed(invARK_proceed),
         .state(state),
         .ark_done(ark_done),
         .enb_n(enb_n),
