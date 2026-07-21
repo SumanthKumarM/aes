@@ -403,9 +403,11 @@ async def run_decryption(dut, key_bytes, ct_bytes, key_size_code,
         if cur_round != prev_round:
             # temp_state just captured the state produced under prev_round
             dut_rounds.append((prev_round, int(dut.InvCipher.temp_state.value)))
-            # invCipher counts down; the last computation round is reached
-            # when the counter arrives at its terminal value
-            if not next_state_driven and cur_round in (0, model.Nr):
+            # invCipher counts down (Nr -> 0), unlike cipher's ascending
+            # round_cntr: the counter's bootstrap load lands it on Nr as its
+            # FIRST transition (right after enable), not its last -- 0 is the
+            # only value that actually marks the final round.
+            if not next_state_driven and cur_round == 0:
                 final_round_seen = True
             prev_round = cur_round
         if not next_state_driven and final_round_seen:

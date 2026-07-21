@@ -27,7 +27,7 @@ module invAddRoundKey(
     logic ark_done_d;  // 1-clk-cycle delayed version of ark_done
 
     // ICG cell to reduce dynamic power consumption
-    icg ICG(gated_clk, (~enb_n | ~rst_n), clk);
+    icg ICG(gated_clk, (~enb_n | ~rst_n | invARK_done), clk);  // invARK_done is also included in enable because invAddRoundKey needs another clk cycle so that it enters disable branch and clears invARK_done 
 
     // number of total CIPHER rounds (Nr) based on KEY size
     //   KEY size = 01 (AES-128): Nr = 10

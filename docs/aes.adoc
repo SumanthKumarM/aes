@@ -1,18 +1,22 @@
 = Composite Masked AES S-Box — Project Documentation
-:description: Master document for the masked AES S-Box and TRNG implementation
+:description: Master document for the masked AES S-Box, TRNG, and the full Cipher/InvCipher encryption and decryption datapaths
 :toc:
 :toc-title: Table of Contents
 :sectnums:
 :doctype: book
 
 This document provides consolidated technical documentation for the Composite Masked AES S-Box implementation.
-It covers the True Random Number Generator (TRNG) that supplies randomness for masked operations, the masked S-Box implementation, the KeyExpansion and AddRoundKey datapaths, and the top-level Cipher block that integrates these components.
+It covers the True Random Number Generator (TRNG) that supplies randomness for masked operations, the masked S-Box and inverse S-Box implementations, the KeyExpansion/AddRoundKey and INVCIPHER key-schedule datapaths, and the top-level Cipher and InvCipher blocks that integrate these components into complete AES encryption and decryption engines.
 
 include::trng.adoc[leveloffset=+1]
 
 include::sbox.adoc[leveloffset=+1]
 
+include::invSbox.adoc[leveloffset=+1]
+
 include::keyExp_logic.adoc[leveloffset=+1]
+
+include::invCipher_keyExp.adoc[leveloffset=+1]
 
 == ShiftRows & MixColumns
 
@@ -37,6 +41,31 @@ Row 0 is unchanged; rows 1–3 are cyclically shifted left by 1, 2, and 3 byte p
 
 `cipher` instantiates both blocks directly (see below) and sequences them between `SubBytes` and `AddRoundKey` each round, per FIPS 197 `CIPHER()`.
 
+== InvShiftRows & InvMixColumns
+
+The `invShiftRows` and `invMixColumns` modules are the decryption-side counterparts of `shiftRows` and `mixColumns`. Like their forward counterparts, they are pure combinational datapath blocks without independent design derivation — direct structural implementations of the FIPS 197 `InvShiftRows()` and `InvMixColumns()` procedures (Section 5.3), operating on the same `state_matrix_t` type.
+
+`invShiftRows` implements the per-row cyclic right shift, the exact inverse of `shiftRows`' left shift, in a single `always_comb` loop over all 16 state bytes:
+
+----
+s'[r][c] = s[r][(c - r) mod 4]      for 0 <= r, c < 4
+----
+
+Row 0 is unchanged; rows 1-3 are cyclically shifted right by 1, 2, and 3 byte positions respectively, undoing the corresponding forward shift exactly.
+
+`invMixColumns` implements the fixed GF(2^8) matrix multiplication that is the matrix inverse of `MixColumns`' Eq. 5.8, applied independently to each of the four columns via a shared `column_op()` function:
+
+----
+[0e 0b 0d 09]   [s0,c]
+[09 0e 0b 0d] x [s1,c]
+[0d 09 0e 0b]   [s2,c]
+[0b 0d 09 0e]   [s3,c]
+----
+
+Each of the four constant GF(2^8) multipliers this matrix requires (`0x9`, `0xb`, `0xd`, `0xe`) is implemented as its own helper function built from repeated applications of `xTimes()` (the standard `GF(2^8)` doubling operation, reduction polynomial `x^8+x^4+x^3+x+1`), following the usual decomposition of each multiplier into a short sum of doublings — for example, `n*0x0e = xTimes(xTimes(xTimes(n))) xor xTimes(xTimes(n)) xor xTimes(n)`.
+
+`invCipher` instantiates both blocks directly (see below) and sequences them between `InvSubBytes` and `AddRoundKey` each round, per FIPS 197 `INVCIPHER()`.
+
 == Cipher
 
 The `cipher` module is the top-level datapath that coordinates `SubBytes` (via `sbox`), `ShiftRows`, `MixColumns`, and `AddRoundKey` into the complete AES encryption round structure. Unlike the S-Box, InvSBox, TRNG, and AddRoundKey blocks, the `cipher` module contains no independent design derivation. It is a direct structural implementation of the FIPS 197 `Cipher()` procedure (Section 5.1):
@@ -59,3 +88,28 @@ end procedure
 ----
 
 The `cipher` module instantiates `sbox`, `shiftRows`, `mixColumns`, and `addRoundKey` as sub-modules, controlling their sequencing through an internal FSM (`PRE_ADDROUNDKEY` / `ADDROUNDKEY` states) that is gated by `round_cntr` and `Nr` (the round count for the active key size — 10/12/14 for AES-128/192/256 per link:keyExp_logic.adoc[KeyExpansion & AddRoundKey]). The routing of random bits from the TRNG to the S-Box and the S-Box/AddRoundKey handshake timing follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation] and link:trng.adoc[TRNG Implementation].
+
+== InvCipher
+
+The `invCipher` module is the top-level datapath that coordinates `InvSubBytes` (via `invSbox`), `InvShiftRows`, `InvMixColumns`, and the inverse key-addition datapath (`invAddRoundKey`, see link:invCipher_keyExp.adoc[AES INVCIPHER Key Expansion Strategy]) into the complete AES decryption round structure. Like `cipher`, it contains no independent design derivation of its own — it is a direct structural implementation of the FIPS 197 `InvCipher()` procedure (Section 5.3):
+
+----
+procedure INVCIPHER(in, Nr, w)
+    state <- in
+    state <- ADDROUNDKEY(state, w[4*Nr..4*Nr+3])
+    for round from Nr-1 downto 1 do
+        state <- INVSHIFTROWS(state)
+        state <- INVSUBBYTES(state)
+        state <- ADDROUNDKEY(state, w[4*round..4*round+3])
+        state <- INVMIXCOLUMNS(state)
+    end for
+    state <- INVSHIFTROWS(state)
+    state <- INVSUBBYTES(state)
+    state <- ADDROUNDKEY(state, w[0..3])
+    return state
+end procedure
+----
+
+Unlike `cipher`, which sits alongside `sbox` and `addRoundKey` as three separate sibling modules wired together at `cipher_top`, `invCipher` instantiates `invShiftRows`, `invSbox`, `invMixColumns`, and `invAddRoundKey` directly as its own sub-modules; only the externally shared `addRoundKey` block, which `invAddRoundKey` drives to build its key-schedule buffer, remains wired in from `invCipher_top`. Sequencing is controlled by an internal FSM (`PRE_INVADDROUNDKEY` / `INVADDROUNDKEY` states) gated by a round counter that, unlike `cipher`'s, counts down from `Nr` to `0` to match `InvCipher()`'s reverse traversal of the round-key schedule. Round `Nr`'s initial ADDROUNDKEY step runs through a separate, simpler code path with no InvShiftRows/InvSubBytes/InvMixColumns, since it is the schedule's starting point rather than its end.
+
+The reroute between `invShiftRows`'s output and `invSbox`'s input, and the write-back of `invSbox`'s output into the round state, both use the same explicit byte-index mapping in each direction, keeping the state matrix from being transposed as it passes through the masked S-Box. The routing of random bits from the TRNG to `invSbox`, and the invSbox/invCipher handshake timing, follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation], link:invSbox.adoc[Composite Masked Inverse AES S-Box Implementation], and link:trng.adoc[TRNG Implementation].

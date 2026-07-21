@@ -191,7 +191,7 @@ module invSbox_top(
     logic trng_key_valid;  // TRNG: data is valid
     logic trng_rst;  // combined reset driven into TRNG
 
-    assign trng_rst = ext_rst_n & !rst_trng;
+    assign trng_rst = ext_rst_n & rst_trng;
 
     trng TRNG(
         .rand_word(rand_num),

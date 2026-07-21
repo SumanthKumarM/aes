@@ -133,7 +133,10 @@ module invCipher(
                             invARK_enb_n <= 1;
                             invCipher_done <= 0;
                             invsr_state_in <= temp_state;  // loading input of invShiftRows
-                            temp_state <= (invSbox_done_pulse) ? invSubBytes : temp_state;
+
+                            for(int i=0; i<16; i++)  // capturing the output of invSbox
+                                temp_state[i%4][i/4] <= (invSbox_done_pulse) ? invSubBytes[((8*(i%4))+(32*(i/4))) +: 8] : temp_state[i%4][i/4];
+                                
                             invSbox_proceed <= invSbox_done_pulse;  // invCIPHER will allow invSbox to advance to next state only when invSbox has computed invSubBytes
                             fsm_state <= (invSbox_done_pulse) ? INVADDROUNDKEY : PRE_INVADDROUNDKEY;
                         end 
