@@ -2,6 +2,9 @@ rtl/trng_param_pkg.sv
 rtl/sbox_top.sv
 rtl/addRoundKey_top.sv
 rtl/cipher_top.sv
+rtl/invSbox_top.sv
+rtl/invAddRoundKey_top.sv
+rtl/invCipher_top.sv
 sim/obj_dir
 sim/sim_build
 sim/.cache  /

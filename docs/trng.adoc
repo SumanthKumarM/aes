@@ -201,7 +201,7 @@ This spreads information throughout the state.
 ==== Chi (χ) — Nonlinear Step
 
 ----
-A[x,y] = A[x,y] ⊕ ((¬A[x+1,y]) ∧ A[x+2,y])
+A[x,y] = A[x,y] ⊕ ((Ā[x+1,y]) · A[x+2,y])
 ----
 
 ==== Iota (ι) — Round Constant Injection
