@@ -4,6 +4,7 @@
 :toc-title: Table of Contents
 :sectnums:
 :doctype: book
+:stem:
 
 This document provides consolidated technical documentation for the Composite Masked AES S-Box implementation.
 It covers the True Random Number Generator (TRNG) that supplies randomness for masked operations, the masked S-Box and inverse S-Box implementations, the KeyExpansion/AddRoundKey and INVCIPHER key-schedule datapaths, and the top-level Cipher and InvCipher blocks that integrate these components into complete AES encryption and decryption engines.
