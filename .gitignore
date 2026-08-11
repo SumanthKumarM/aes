@@ -12,6 +12,9 @@ sim/dump.vcd
 sim/results.xml
 sim/*.log
 sim/*.jou
+synth/reports/
+synth/sta_reports/
+synth/synth_reports/
 synth/*.dot
 synth/*.json
 synth/*.pdf
@@ -25,6 +28,7 @@ synth/*.backup.*
 synth/.Xil/
 docs/*html
 docs/*pdf
+lint/reports/
 lint/*.jou
 lint/*.log
 lint/*.backup.*
