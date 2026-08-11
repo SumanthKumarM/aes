@@ -58,13 +58,29 @@ def discover_sources(rtl_dir: str, block: str) -> list[str]:
 
 def build_yosys_script(template: str, block: str, sources: list[str]) -> str:
     """
-    Replace ${BLOCK} in the template and inject the discovered sources as a
-    single read_slang argument list (read_slang takes all files in one call,
-    unlike read_verilog which is invoked once per file).
+    Replace template variables and inject the discovered sources as one
+    read_slang argument list.
     """
     read_sources = " ".join(sources)
     script = template.replace("${READ_SOURCES}", read_sources)
     script = script.replace("${BLOCK}", block)
+    script = script.replace(
+        "${LIBERTY}",
+        os.environ.get(
+            "LIBERTY", "/opt/pdks/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+        ),
+    )
+    script = script.replace(
+        "${REPORT_DIR}",
+        os.environ.get("REPORT_DIR", os.path.join(os.path.dirname(__file__), "reports")),
+    )
+    if os.environ.get("SCHEMATIC", "0") not in ("", "0", "false", "False"):
+        schematic_command = (
+            f"show -format dot -prefix {os.environ.get('REPORT_DIR', os.path.join(os.path.dirname(__file__), 'reports'))}/{block}_schematic {block}"
+        )
+    else:
+        schematic_command = "# schematic disabled"
+    script = script.replace("${SCHEMATIC_COMMAND}", schematic_command)
     return script
 
 
@@ -83,6 +99,8 @@ def run_yosys() -> None:
         sys.exit(1)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    report_dir = os.environ.get("REPORT_DIR", os.path.join(script_dir, "reports"))
+    os.makedirs(report_dir, exist_ok=True)
     rtl_dir = os.path.normpath(os.path.join(script_dir, "../rtl"))
 
     # Discover only the files this block needs
@@ -97,7 +115,7 @@ def run_yosys() -> None:
 
     tmp_path = None
     try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".ys", dir=script_dir)
+        fd, tmp_path = tempfile.mkstemp(suffix=".ys", dir=report_dir)
         with os.fdopen(fd, "w") as tmp:
             tmp.write(script_content)
 
@@ -107,11 +125,12 @@ def run_yosys() -> None:
             print(f"Error: Yosys exited with code {result.returncode}.")
             sys.exit(result.returncode)
 
-        # Convert schematic
-        dot_to_pdf(
-            os.path.join(script_dir, f"{block}_schematic.dot"),
-            os.path.join(script_dir, f"{block}_schematic.pdf"),
-        )
+        # Convert schematic only when explicitly requested.
+        if os.environ.get("SCHEMATIC", "0") not in ("", "0", "false", "False"):
+            dot_to_pdf(
+                os.path.join(report_dir, f"{block}_schematic.dot"),
+                os.path.join(report_dir, f"{block}_schematic.pdf"),
+            )
 
     finally:
         if tmp_path and os.path.exists(tmp_path):

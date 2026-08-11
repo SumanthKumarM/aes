@@ -1,20 +1,27 @@
-# Sources are injected by block_lvl_synth_gen.py
-${READ_SOURCES}
+# Sources are injected by block_lvl_synth_gen.py. Slang is required because
+# the RTL uses SystemVerilog packages and imports.
+plugin -i slang
+read_slang ${READ_SOURCES}
 
-# Elaborate
-hierarchy -check -top ${BLOCK}
-proc
-opt
-memory
-opt
-techmap
-opt
+# Target standard-cell library.  The generator replaces ${LIBERTY}; keeping
+# this as a template variable allows the Makefile (or a direct generator
+# invocation) to override the library without editing this script.
+read_liberty -lib ${LIBERTY}
+
+# Synthesize and lower the RTL, skipping Yosys's library-less ABC pass. The
+# actual technology mapping below is performed against Nangate45.
+synth -top ${BLOCK} -noabc
+dfflibmap -liberty ${LIBERTY}
+abc -fast -liberty ${LIBERTY}
+opt_clean
 
 # Reports / stats
-stat
+tee -o ${REPORT_DIR}/${BLOCK}_area.rpt stat -liberty ${LIBERTY}
 
-# Schematic — produces ${BLOCK}_schematic.dot and then converted to pdf by py script
-show -format dot -prefix ${BLOCK}_schematic ${BLOCK}
+# Schematic generation is opt-in. Graphviz conversion of a large block can
+# take longer than synthesis itself; normal synthesis must not wait for it.
+${SCHEMATIC_COMMAND}
 
-# Write netlist
-write_json ${BLOCK}_netlist.json
+# Write mapped netlists for both inspection and OpenSTA.
+write_verilog -noattr ${REPORT_DIR}/${BLOCK}_netlist.v
+write_json ${REPORT_DIR}/${BLOCK}_netlist.json

@@ -4,6 +4,9 @@ TB_DIR = ../tb
 SIM_DIR = .
 SYNTH_DIR = ../synth
 LINT_DIR = ../lint
+SYNTH_REPORT_DIR := $(SYNTH_DIR)/synth_reports
+STA_REPORT_DIR := $(SYNTH_DIR)/sta_reports
+LINT_REPORT_DIR := $(LINT_DIR)/reports
 SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
 TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
 TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
@@ -13,14 +16,24 @@ export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the cu
 export PYTHONDONTWRITEBYTECODE := 1  # Prevent __pycache__ creation in source directories 
 $(shell mkdir -p $(PYTHONPYCACHEPREFIX))  # Create the cache directory if it doesn't exist
 export PYTHONPATH := $(TB_DIR):$(SIM_DIR):$(PYTHONPATH)
+SHELL := /bin/bash
 
 # Cocotb setup
 SIM = verilator
 
-# Linting Tools 
+# Tools 
 VERIBLE_LINT = verible-verilog-lint
 SLANG = slang
 YOSYS = yosys
+OPENSTA = sta
+
+# Synthesis defaults.  Override with, for example:
+#   make synth tool=vivado block=cipher freq=200
+#   make synth tool=yosys  block=cipher freq=200
+# The Yosys flow uses the library for standard-cell mapping; its ABC mapping
+# does not consume a clock constraint, while Vivado uses freq for STA.
+NANGATE45_LIB ?= /opt/pdks/nangate45/lib/NangateOpenCellLibrary_typical.lib
+freq ?= 100
 
 # tool selection
 tool ?= vivado  # default tool
@@ -28,7 +41,7 @@ SELECTED_TOOL := $(strip $(tool))
 
 # vivado paths
 VIVADO = vivado -mode batch -notrace
-VIVADO_LINT  = vivado -mode batch -notrace -journal $(LINT_DIR)/vivado.jou -log $(LINT_DIR)/vivado.log
+VIVADO_LINT  = vivado -mode batch -notrace -journal $(LINT_REPORT_DIR)/vivado_lint.jou -log $(LINT_REPORT_DIR)/vivado_lint.log
 
 # schematic ?= (unset) -- pass `schematic=1` to `make synth` to additionally
 # generate a schematic PDF. That needs GUI context (start_gui), so it switches
@@ -41,7 +54,7 @@ ifeq ($(strip $(schematic)),)
 else
     VIVADO_SYNTH_MODE = tcl
 endif
-VIVADO_SYNTH = vivado -mode $(VIVADO_SYNTH_MODE) -notrace -journal $(SYNTH_DIR)/vivado.jou -log $(SYNTH_DIR)/vivado.log
+VIVADO_SYNTH = vivado -mode $(VIVADO_SYNTH_MODE) -notrace -journal $(SYNTH_REPORT_DIR)/vivado_synth.jou -log $(SYNTH_REPORT_DIR)/vivado_synth.log
 
 # Verilator specific flags
 EXTRA_ARGS += --trace --trace-structs 
@@ -160,60 +173,93 @@ run_test: gen_top $(BLOCK_DEPS)
 
 # cocotb inclusion -
 # This file provides the 'sim' target
+COCOTB_CONFIG := $(shell command -v cocotb-config 2>/dev/null)
+ifneq ($(strip $(COCOTB_CONFIG)),)
 include $(shell cocotb-config --makefiles)/Makefile.sim
+else
+.PHONY: sim
+sim:
+	@echo "Error: cocotb-config not found; simulation targets are unavailable."
+	@exit 1
+endif
 
 # Linting Targets 
 .PHONY: lint-style
 lint-style: $(BLOCK_DEPS)
+	@mkdir -p $(LINT_REPORT_DIR)
 	@echo "Running Verible Style Lint..."
-	$(VERIBLE_LINT) $(VERILOG_SOURCES) --rules_config_search
+	$(VERIBLE_LINT) $(VERILOG_SOURCES) --rules_config_search 2>&1 | tee $(LINT_REPORT_DIR)/verible_lint.log
 
 .PHONY: lint-syntax
 lint-syntax: $(BLOCK_DEPS)
+	@mkdir -p $(LINT_REPORT_DIR)
 	@echo "Running Slang Syntax Check..."
-	$(SLANG) $(VERILOG_SOURCES) -I$(RTL_DIR) --top $(block)
+	$(SLANG) $(VERILOG_SOURCES) -I$(RTL_DIR) --top $(block) 2>&1 | tee $(LINT_REPORT_DIR)/slang_lint.log
 
 .PHONY: lint-synth
 lint-synth: $(BLOCK_DEPS)
+	@mkdir -p $(LINT_REPORT_DIR)
 	@echo "Running Yosys Synthesis Lint (Slang Parser)..."
 	$(YOSYS) -p "plugin -i slang; \
 				read_slang $(VERILOG_SOURCES); \
 				hierarchy -check -top $(block); \
 				proc; \
 				check; \
-				stat"
+				tee -o $(LINT_REPORT_DIR)/yosys_lint.rpt stat"
 
 .PHONY: lint-vivado
 lint-vivado: $(BLOCK_DEPS)
+	@mkdir -p $(LINT_REPORT_DIR)
 	@echo "Running Vivado Elaborated Design Lint for $(block)..."
-	cd $(LINT_DIR) && $(VIVADO_LINT) -source block_lvl_lint.tcl -tclargs $(block)
+	cd $(LINT_DIR) && $(VIVADO_LINT) -source block_lvl_lint.tcl -tclargs $(block) 2>&1 | tee $(LINT_REPORT_DIR)/vivado_lint_console.log
 
 # A master lint target to run everything
 .PHONY: lint
 lint: 
+	@mkdir -p $(LINT_REPORT_DIR)
 	@if [ "$(SELECTED_TOOL)" = "vivado" ]; then \
-		$(MAKE) lint-vivado block=$(block) 2>&1 | tee $(LINT_DIR)/vivado_lint.log; \
+		$(MAKE) lint-vivado block=$(block) 2>&1 | tee $(LINT_REPORT_DIR)/vivado_lint_make.log; \
 	else \
-		@echo "Running multi-tool lint (Verible/Slang/Yosys)..."; \
-		$(MAKE) lint-style lint-syntax lint-synth 2>&1 | tee $(LINT_DIR)/yosys_slang_lint.log; \
+		echo "Running multi-tool lint (Verible/Slang/Yosys)..."; \
+		$(MAKE) lint-style lint-syntax lint-synth 2>&1 | tee $(LINT_REPORT_DIR)/yosys_slang_lint.log; \
 	fi
 
 .PHONY: synth
 synth: $(BLOCK_DEPS)
+	@mkdir -p $(SYNTH_REPORT_DIR)
 	@echo "Running synthesis for $(block) using $(tool)..."
 	@if [ "$(SELECTED_TOOL)" = "vivado" ]; then \
-		cd $(SYNTH_DIR) && $(VIVADO_SYNTH) -source block_lvl_synth.tcl -tclargs $(block) $(if $(schematic),schematic,) 2>&1 | tee $(SYNTH_DIR)/vivado_synth.log; \
+		cd $(SYNTH_DIR) && SYNTH_REPORT_DIR=$(SYNTH_REPORT_DIR) $(VIVADO_SYNTH) -source block_lvl_synth.tcl -tclargs $(block) $(freq) $(if $(schematic),schematic,) 2>&1 | tee $(SYNTH_REPORT_DIR)/vivado_synth_console.log; \
 	elif [ "$(SELECTED_TOOL)" = "yosys" ]; then \
-		cd $(SYNTH_DIR) && BLOCK=$(block) python3 block_lvl_synth_gen.py 2>&1 | tee $(SYNTH_DIR)/yosys_synth.log; \
+		cd $(SYNTH_DIR) && BLOCK=$(block) LIBERTY=$(NANGATE45_LIB) REPORT_DIR=$(SYNTH_REPORT_DIR) SCHEMATIC=$(if $(schematic),1,0) python3 block_lvl_synth_gen.py 2>&1 | tee $(SYNTH_REPORT_DIR)/yosys_synth.log; \
 	else \
 		echo "Error: Unknown tool '$(tool)'. Use 'vivado' or 'yosys'."; exit 1; \
 	fi
+
+.PHONY: sta
+sta:
+	@if [ -z "$(block)" ]; then \
+		echo "Error: pass block=<block_name>, for example: make sta block=cipher"; exit 1; \
+	fi
+	@mkdir -p $(STA_REPORT_DIR)
+	@if [ ! -f "$(SYNTH_REPORT_DIR)/$(block)_netlist.v" ]; then \
+		echo "No mapped netlist found; running Yosys synthesis for $(block)..."; \
+		$(MAKE) synth tool=yosys block=$(block) freq=$(freq); \
+	fi
+	@set -o pipefail; \
+	LIBERTY=$(NANGATE45_LIB) TOP=$(block) NETLIST=$(SYNTH_REPORT_DIR)/$(block)_netlist.v \
+	OUT_DIR=$(STA_REPORT_DIR)/$(block) FREQ_MHZ=$(freq) \
+	$(OPENSTA) -no_init -exit $(SYNTH_DIR)/block_lvl_sta.tcl \
+	2>&1 | tee $(STA_REPORT_DIR)/$(block)_sta.log
 
 .PHONY: clean_all
 clean_all: clean
 	rm -f ./*.vcd ./*.fst ./*.log ./*.xml
 	rm -rf sim_build ./.cache* obj_dir
 	rm -rf $(TB_DIR)/__pycache__  # Remove any Python cache from source directory
+	rm -rf $(SYNTH_REPORT_DIR)/
+	rm -rf $(STA_REPORT_DIR)/
+	rm -rf $(LINT_REPORT_DIR)/
 	rm -rf $(SYNTH_DIR)/*.log $(SYNTH_DIR)/*.dot $(SYNTH_DIR)/*.json $(SYNTH_DIR)/*.v
 	rm -rf $(SYNTH_DIR)/*.jou $(SYNTH_DIR)/*.rpt $(SYNTH_DIR)/*.dcp $(SYNTH_DIR)/*.svg.new
 	rm -rf $(SYNTH_DIR)/*.pdf $(SYNTH_DIR)/*.backup.*

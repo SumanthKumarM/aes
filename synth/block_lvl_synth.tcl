@@ -1,11 +1,26 @@
 # Args
-if {$argc < 1 || $argc > 2} {
-    puts "Error: Usage: vivado -source block_lvl_synth.tcl -tclargs <block_name> \[schematic\]"
+if {$argc < 1 || $argc > 3} {
+    puts "Error: Usage: vivado -source block_lvl_synth.tcl -tclargs <block_name> \[frequency_mhz\] \[schematic\]"
     exit 1
 }
 set block [lindex $argv 0]
-set gen_schematic [expr {$argc == 2 && [lindex $argv 1] eq "schematic"}]
+set frequency_mhz 100.0
+set gen_schematic 0
+for {set arg_idx 1} {$arg_idx < $argc} {incr arg_idx} {
+    set arg [lindex $argv $arg_idx]
+    if {$arg eq "schematic"} {
+        set gen_schematic 1
+    } else {
+        set frequency_mhz $arg
+    }
+}
+if {$frequency_mhz <= 0} {
+    puts "Error: frequency_mhz must be greater than zero"
+    exit 1
+}
 set RTL_DIR [file normalize "../rtl"]
+set REPORT_DIR [file normalize "reports"]
+file mkdir $REPORT_DIR
 
 # Define block dependencies
 proc get_block_dependencies { block } {
@@ -110,21 +125,17 @@ synth_design -top $block -part xc7a35tcsg324-1 -flatten_hierarchy none
 set design_name [get_designs]
 current_design $design_name
 
-# Clock constraint — required for Vivado's STA engine to analyze any reg-to-reg
-# path at all, and for report_power's dynamic-power estimate to mean anything
-# (it scales with frequency). 100MHz/10ns is a placeholder target, not a claim
-# about what this design can hit -- tune it once you have a real target. Either
-# way, "Data Path Delay" in the detailed timing report below is the raw cell+net
-# propagation delay and is independent of this period value, so it reflects the
-# true critical path regardless of what you set here.
-create_clock -period 10.000 -name clk [get_ports clk]
+# Clock constraint.  The default is 100 MHz (10 ns), matching the previous
+# flow; the Makefile can pass another frequency in MHz.
+set clock_period_ns [expr {1000.0 / $frequency_mhz}]
+create_clock -period $clock_period_ns -name clk [get_ports clk]
 
 # Reports: area, power, timing
-report_utilization -file "${block}_utilization.rpt"
-report_power -file "${block}_power.rpt"
-report_timing_summary -file "${block}_timing.rpt"
-report_timing -delay_type max -sort_by group -path_type full -nworst 10 -file "${block}_timing_detail.rpt"
-write_checkpoint -force "${block}_synth.dcp"
+report_utilization -file [file join $REPORT_DIR "${block}_utilization.rpt"]
+report_power -file [file join $REPORT_DIR "${block}_power.rpt"]
+report_timing_summary -file [file join $REPORT_DIR "${block}_timing.rpt"]
+report_timing -delay_type max -sort_by group -path_type full -nworst 10 -file [file join $REPORT_DIR "${block}_timing_detail.rpt"]
+write_checkpoint -force [file join $REPORT_DIR "${block}_synth.dcp"]
 
 # Schematic — opt-in only (pass `schematic=1` to `make synth`), since it needs
 # an active GUI context: show_schematic/write_schematic are silent no-ops
@@ -135,7 +146,7 @@ if {$gen_schematic} {
     if {[catch {
         start_gui
         show_schematic [get_cells -hierarchical]
-        write_schematic -format pdf -force -orientation landscape "${block}_schematic.pdf"
+        write_schematic -format pdf -force -orientation landscape [file join $REPORT_DIR "${block}_schematic.pdf"]
         stop_gui
     } err]} {
         puts "Warning: schematic generation failed: $err"

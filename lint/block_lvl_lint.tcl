@@ -5,6 +5,8 @@ if { $argc != 1 } {
 }
 set block [lindex $argv 0]
 set RTL_DIR [file normalize "../rtl"]
+set REPORT_DIR [file normalize "../synth/reports"]
+file mkdir $REPORT_DIR
 
 # Define block dependencies
 proc get_block_dependencies { block } {
