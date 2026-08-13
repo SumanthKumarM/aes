@@ -96,21 +96,17 @@ else ifeq ($(block),cipher_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),unmasked_cipher)
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invSbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/invShiftRows.sv $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invCipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher)
-	# invCipher instantiates invSbox/invShiftRows/invMixColumns internally;
-	# addRoundKey is NOT included -- it sits at the same hierarchy level as
-	# invCipher (shared with cipher) and is only wired in by invCipher_top
 	VERILOG_SOURCES += $(RTL_DIR)/invSbox.sv $(RTL_DIR)/invShiftRows.sv $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invAddRoundKey_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invAddRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invAddRoundKey)
-	# invAddRoundKey receives exp_key/ark_done from an externally-wired
-	# AddRoundKey (same sibling-hierarchy pattern as cipher/invCipher) --
-	# it does not instantiate sbox/addRoundKey itself
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),icg)
 	# icg.sv is already in base VERILOG_SOURCES, so not needed here
