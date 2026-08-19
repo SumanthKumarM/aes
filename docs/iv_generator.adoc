@@ -68,44 +68,23 @@ CTR_DRBG stage is active.
 === Ring Oscillator Array
 
 The noise source is built from 32 ring oscillators, each 13 inverters deep, the same base
-structure used by the existing `trng.sv` TRNG. The 32 oscillators are partitioned into 8 groups
-of 4:
+structure used by the existing `trng.sv` TRNG. All 32 oscillator outputs are combined through a
+single XOR mixing tree and sampled by an independently clocked D flip-flop:
 
 ----
-Group 0: RO[0:3]   → XOR → bit[0]
-Group 1: RO[4:7]   → XOR → bit[1]
-...
-Group 7: RO[28:31] → XOR → bit[7]
+RO[0:31] → XOR tree → DFF → raw_bit_stream
 ----
 
-Each group is sampled by an independently clocked D flip-flop, producing an *8-bit output per
-sampling cycle* at a 150 MHz sampling clock, in place of the single-bit-per-cycle output of a
-conventional 32-RO XOR-tree design.
+This produces *one raw bit per sampling cycle* at a 150 MHz sampling clock — the same noise
+source structure and output rate described in `trng.adoc` for the Sbox-masking TRNG.
 
 === Latency Justification
 
 The entropy collector requires 256 raw bits per conditioning call (see
-<<entropy-collector-width>>). At 8 bits/cycle and 150 MHz:
-
-[cols="1,1,1"]
-|===
-| Sourcing Rate | Cycles to Fill 256-bit Collector | Time
-
-| 1 bit/cycle
-| 256
-| ≈ 1.71 µs
-
-| 8 bits/cycle
-| 32
-| ≈ 213 ns
-|===
-
-The 8-bit output reduces collector fill time by a factor of 8 relative to a single-bit source,
-without increasing the ring-oscillator count. Each 4-RO group retains the same
-per-bit min-entropy as an individual oscillator in the original design; health tests (RCT/APT)
-continue to operate on the combined output stream and catch bias in any group. The estimated
-hardware overhead is 5–10% additional logic for output multiplexing and formatting, absorbed
-into the existing 32-RO area budget.
+<<entropy-collector-width>>). At 1 bit/cycle and 150 MHz, filling the collector takes 256
+cycles, ≈ 1.71 µs. Entropy collection and conditioning execute only during CTR_DRBG instantiate
+and reseed — once per `reseed_interval = 1024` `Generate()` calls, never on the per-IV path — so
+this latency is amortized across many IV outputs and is not on the per-IV critical path.
 
 === Independence from the Sbox-Masking TRNG
 
@@ -118,12 +97,23 @@ generator's entropy collector. Duplicating a ring-oscillator noise source is ine
 silicon relative to duplicating AES logic, and removes any risk of statistical entanglement
 between the two consumers.
 
+[[health-tests]]
 == Health Tests
 
 Health testing reuses the Repetition Count Test (RCT) and Adaptive Proportion Test (APT)
 implementation from `trng.sv:health_tests`, instantiated a second time for this noise source.
 Test parameters follow the same derivation documented in `trng.adoc` and
 `aes/sim/gen_param.py`.
+
+Reuse is verbatim — no modification to the module and no change to `RCT_THRESHOLD` or
+`APT_THRESHOLD` — because this noise source presents exactly the interface the module already
+expects: one raw bit per sampling clock, drawn from a full 32-oscillator XOR tree carrying the
+same characterized min-entropy the thresholds were derived from.
+
+NOTE: The APT window is 1024 bits, four times the depth of the 256-bit entropy collector. A
+window therefore cannot complete within a single collection burst, so the health tests must run
+continuously on the raw bit stream — as they do in `trng.sv`'s BIST state — rather than only
+while the collector is filling.
 
 [[entropy-collector-width]]
 == Entropy Collector
@@ -555,10 +545,6 @@ CTR_DRBG operations are never required simultaneously for a single IV generation
 | No side-channel protection on DRBG state updates
 | ~60–70% cycle reduction and ~80% area reduction versus the masked Sbox, on the IV-generation critical path
 
-| 8-bit/cycle noise source (vs. 1 bit/cycle)
-| ~5–10% additional multiplexing/formatting logic
-| 8× reduction in entropy-collector fill time (≈1.71 µs → ≈213 ns)
-
 | 256-bit entropy collector (vs. 192-bit theoretical floor)
 | Slightly higher fill latency than the theoretical minimum
 | Margin against measurement uncertainty in actual noise-source min-entropy; clean power-of-two RTL width
@@ -605,6 +591,8 @@ CTR_DRBG operations are never required simultaneously for a single IV generation
   `Generate()` call.
 * A second, physically independent noise-source instance is used, separate from the noise
   source backing the cipher block's Sbox-masking TRNG.
+* The noise source emits one raw bit per sampling cycle from a full 32-oscillator XOR tree,
+  matching `trng.adoc`.
 
 [[verification-items]]
 == Verification Items

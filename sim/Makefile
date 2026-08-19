@@ -11,6 +11,7 @@ SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
 TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
 TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
 COMPOSITE_MATH_PKG = $(RTL_DIR)/composite_field_math.sv
+DRBG_UTILS = $(RTL_DIR)/drbg_utilities.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
 export PYTHONDONTWRITEBYTECODE := 1  # Prevent __pycache__ creation in source directories 
@@ -81,9 +82,15 @@ GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCiphe
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 
-ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
+# drbg_utilities.sv holds the entropy collector and the SP 800-90B health tests,
+# shared by trng.sv and cbc_mac.sv (and pulled in transitively by every _top
+# wrapper that embeds a real TRNG). health_tests reads RCT_THRESHOLD /
+# APT_BIT_WINDOW / APT_THRESHOLD, so the blocks needing drbg_utilities.sv are
+# exactly the blocks needing trng_param_pkg.sv -- both are added together, with
+# the parameter package first so its imports resolve.
+ifneq ($(filter $(block),trng cbc_mac sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
-    VERILOG_SOURCES += $(TRNG_PARAM_FILE)
+    VERILOG_SOURCES += $(TRNG_PARAM_FILE) $(DRBG_UTILS)
 endif
 
 ifeq ($(block),sbox_top)
@@ -98,6 +105,10 @@ else ifeq ($(block),cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),unmasked_cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),cbc_mac)
+	# CBC-MAC conditioner: unmasked AES-256 datapath + entropy collector/health
+	# tests from drbg_utilities.sv (added above alongside trng_param_pkg.sv)
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invSbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher_top)

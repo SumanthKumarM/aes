@@ -53,4 +53,10 @@ package type_defs_pkg;
         PRE_INVADDROUNDKEY,
         INVADDROUNDKEY
     } invCipher_internal_states;
+
+    typedef enum logic [1:0] {
+        CONSUME,
+        OPERATE,
+        ERROR
+    } cbc_mac_states;
 endpackage
