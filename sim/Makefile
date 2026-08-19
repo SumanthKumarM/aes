@@ -121,7 +121,15 @@ TOPLEVEL ?= $(block)
 # design block under test, not the generated verification wrapper, so strip a
 # trailing "_top" when deriving the module name (sbox_top -> sbox_tb,
 # addRoundKey_top -> addRoundKey_tb, cipher_top -> cipher_tb).
-COCOTB_TEST_MODULES ?= $(patsubst %_top,%,$(block))_tb
+#
+# Blocks whose testbench is shared with another block override that default via
+# TB_MODULE_<block>. unmasked_cipher.sv implements the same FIPS 197 CIPHER
+# procedure as cipher.sv (LUT S-Box, no TRNG, AES-256 only), so cipher_tb.py
+# verifies both: it auto-detects the DUT flavor from COCOTB_TOPLEVEL and skips
+# the AES-128/192 known-answer tests when the DUT is AES-256 only.
+TB_MODULE_unmasked_cipher := cipher_tb
+
+COCOTB_TEST_MODULES ?= $(or $(TB_MODULE_$(block)),$(patsubst %_top,%,$(block))_tb)
 
 # handle specific test selection
 ifneq ($(test),)

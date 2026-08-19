@@ -70,7 +70,7 @@ package unmkased_sbox;
         end
         else begin  // used by AddRoundKey which requires subByte for only 4 bytes
             return {
-                96'h0000_0000_0000,
+                96'h0000_0000_0000_0000_0000_0000,
                 AES_SBOX[in_state[31:24]],
                 AES_SBOX[in_state[23:16]],
                 AES_SBOX[in_state[15:8]],
@@ -119,7 +119,7 @@ module addRoundKey_AES256(
     logic gated_clk;  // gated clock to reduce dynamic power consumption
 
     // ICG cell to reduce dynamic power consumption
-    icg ICG(gated_clk, (~enb_n | ark_done | ~rst_n), clk);  // ark_done is also included in enable because AddRoundKey needs another clk cycle so that it enters disable branch and clears ark_done 
+    icg ICG(gated_clk, (~enb_n | ~rst_n), clk); 
 
     // function to left rotate the bytes in a given word
     function automatic word_t rotWord(input word_t word);
@@ -147,7 +147,7 @@ module addRoundKey_AES256(
                     for(int i=0; i<4; i++) begin
                         if(i == 0)  // since this index is multiple of 8 it satisfies i%8 = 0. So special transformation is applied
                             {expKey[3][0], expKey[2][0], expKey[1][0], expKey[0][0]} = {prev_expKey[3][0], prev_expKey[2][0], prev_expKey[1][0], prev_expKey[0][0]} ^ 
-                                                                                       unmaskedSbox({96'h0000_0000_0000, rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]})}, 1'b0)[31:0] ^ RCON[{1'b0, round_num[3:1]}];
+                                                                                       unmaskedSbox({96'd0, rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]})}, 1'b0)[31:0] ^ RCON[{1'b0, round_num[3:1]}];
                         else  // remaining all indices in this loop range don't satisfy i%8 = 0 and i%8 = 4. So normal transformation is applied
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
                     end
@@ -162,7 +162,7 @@ module addRoundKey_AES256(
                     for(int i=4; i<8; i++) begin
                         if(i == 4)  // since this index satisfies i%8 = 4, special transformation is applied
                             {expKey[3][4], expKey[2][4], expKey[1][4], expKey[0][4]} = {prev_expKey[3][4], prev_expKey[2][4], prev_expKey[1][4], prev_expKey[0][4]} ^
-                                                                                       unmaskedSbox({96'h0000_0000_0000, {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]}}, 1'b0)[31:0];
+                                                                                       unmaskedSbox({96'd0, {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]}}, 1'b0)[31:0];
                         else  // remaining all indices in this loop range don't satisfy i%8 = 0 and i%8 = 4. So normal transformation is applied
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
                     end
@@ -179,7 +179,9 @@ module addRoundKey_AES256(
             for(int i=0; i<16; i++) addRoundKeyOut[i/4][i%4] <= 8'h00;
         end
         else begin
-            if(!enb_n) begin  // module functions since it's enabled
+            // as CIPHER ties ard_done to ark_enb_n when needed this block is required to function only when output is still
+            // not computed yet so it helps to avoid execution of this block more than once which corrupts prev_expKey register
+            if(!enb_n && !ark_done) begin
                 if(round_num == 0) begin  // first round simply uses master KEY
                     for(int i=0; i<8; i++)  // simply loading maskter KEY into expKey for further usage
                         {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} <= master_key[(32*i) +: 32];
@@ -265,8 +267,11 @@ module unmasked_cipher(
     addRoundKey_AES256 AddRoundKey(addRoundKeyOut, ark_done, ark_state, master_key, round_cntr, ark_enb_n, rst_n, gated_clk);
 
     always_comb begin  // rerouting subBytes to subBytes_matrix as both of them are in different formats
-        for(int i=0; i<16; i++)
-            subBytes_matrix[i%4][i/4] = unmaskedSbox(sbox_state, 1'b1)[((8*(i%4))+(32*(i/4))) +: 8];  // computing subBytes for given state matrix
+        for(int i=0; i<16; i++)  // loading Sbox input with previous addRoundKey's output
+            sbox_state[((8*(i%4))+(32*(i/4))) +: 8] = temp_state[i%4][i/4];
+                                
+        for(int i=0; i<16; i++)  // computing subBytes for given state matrix
+            subBytes_matrix[i%4][i/4] = unmaskedSbox(sbox_state, 1'b1)[((8*(i%4))+(32*(i/4))) +: 8];
     end
 
     /**
@@ -296,14 +301,16 @@ module unmasked_cipher(
             for(int i=0; i<16; i++) begin
                 cipher_state[i%4][i/4] <= 8'h00;
                 temp_state[i%4][i/4] <= 8'h00;
-                sbox_state[((8*(i%4))+(32*(i/4))) +: 8] <= 8'h00;
                 ark_state[i%4][i/4] <= 8'h00;
             end
         end
         else begin  // (for round from 1 to Nr − 1 do ... end for) & last round
             if(!enb_n) begin  // CIPHER operates when enabled
                 if(round_cntr == 0) begin  // only AddRoundKey is performed in first cipher round
-                    ark_enb_n <= 0;  // addRoundKey is enabled
+                    // AddRoundKey is disabled when it has computed the output to protect it from using stale 
+                    // previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
+                    ark_enb_n <= ark_done;
+
                     ark_state <= state;  // loading input of addRoundKey
                     temp_state <= (ark_done) ? addRoundKeyOut : temp_state;
                     round_cntr <= (ark_done) ? 1 : 0;
@@ -315,17 +322,16 @@ module unmasked_cipher(
                         PRE_ADDROUNDKEY: begin
                             ark_enb_n <= 1;
                             cipher_done <= 0;  // CIPHER is not done computing transformed state yet
-                            
-                            for(int i=0; i<16; i++)  // loading Sbox input with previous addRoundKey's output
-                                sbox_state[((8*(i%4))+(32*(i/4))) +: 8] <= temp_state[i%4][i/4];
 
                             // since SBox is done computing subBytes it will traverse through ShiftRows and MixColumns which are pure combinational giving MixColumn's / ShiftRow's output
                             temp_state <= (round_cntr == Nr) ? shift_rows : mix_columns;
                             fsm_state <= ADDROUNDKEY;
                         end 
                         ADDROUNDKEY: begin
-                            // AddRoundKey is disabled when it has computed the output to protect it from using stale previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
+                            // AddRoundKey is disabled when it has computed the output to protect it from using stale 
+                            // previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
                             ark_enb_n <= ark_done;
+
                             ark_state <= temp_state;  // loading addRoundKey input with MixColumn's / ShiftRow's output
                             temp_state <= (ark_done) ? addRoundKeyOut : temp_state;
 
@@ -358,7 +364,6 @@ module unmasked_cipher(
                 fsm_state <= fsm_state;
                 cipher_state <= cipher_state;
                 temp_state <= temp_state;
-                sbox_state <= sbox_state;
                 ark_state <= ark_state;
             end
         end

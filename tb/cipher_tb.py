@@ -1,65 +1,87 @@
 """
-Cocotb testbench for the CIPHER block (cipher.sv), verified through the
-auto-generated cipher_top wrapper.
+Cocotb testbench for the AES forward-CIPHER datapath.
 
-cipher.sv itself only implements ShiftRows/MixColumns and the round FSM --
-SBox and AddRoundKey are instantiated as SIBLINGS of CIPHER inside cipher_top
-(not nested inside cipher.sv), since both are shared resources also used by
-the future invCIPHER block. cipher_top wires CIPHER to a real TRNG + a single
-shared SBox instance + a single AddRoundKey instance: CIPHER owns the shared
-SBox for its own SubBytes step (sbox_enb_n=2'b01) and hands control of it to
-AddRoundKey during KeyExpansion (sbox_enb_n <= ark_sbox_enb_n), acknowledging
-via sbox_proceed <= 1 in sync with ark_done -- this is the same
-"caller-gates-its-own-enable" pattern already validated on invCipher's SBox
-sharing (see project docs/RTL bug history for that block).
+ONE TESTBENCH, TWO DUT FLAVORS
+------------------------------
+Both forward ciphers in this project implement the identical FIPS 197 CIPHER
+procedure and share ShiftRows/MixColumns, so they share this testbench. The
+flavor is auto-detected from COCOTB_TOPLEVEL at import time:
+
+    make run_all block=cipher_top       -> "masked"    (cipher.sv via cipher_top.sv)
+    make run_all block=unmasked_cipher  -> "unmasked"  (unmasked_cipher.sv)
+
+                    | cipher_top (masked)            | unmasked_cipher
+    ----------------+--------------------------------+---------------------------
+    SubBytes        | masked composite-field SBox,   | plain 256-entry LUT,
+                    | TRNG-fed, multi-cycle          | purely combinational
+    AddRoundKey     | shared `addRoundKey` sibling;  | private `addRoundKey_AES256`
+                    | borrows the shared SBox for    | with its own LUT SBox for
+                    | KeyExpansion subWord           | KeyExpansion subWord
+    Key sizes       | 128 / 192 / 256 (`key_size`)   | 256 ONLY (no `key_size` port)
+    TRNG            | real `trng` instance driven by | none -- no `raw_rand_bit`,
+                    | `raw_rand_bit`/`sampling_clk`  | no `sampling_clk`
+    Round-FSM regs  | dut.CIPHER.{round_cntr,...}    | dut.{round_cntr,...} (top)
+
+Everything the two flavors do NOT share is funnelled through the small adapter
+layer below (`cipher_core`, `start_clocks`, `start_noise`, `reset_dut`,
+`run_encryption`), so the test bodies themselves are flavor-agnostic. Tests that
+need a key size the DUT cannot do are skipped rather than silently reinterpreted;
+the two generic tests (back-to-back, random stimulus) run at the flavor's
+GEN_KEY_BITS so both DUTs get that coverage.
 
 Golden reference: a NIST FIPS 197 software model (key expansion + full
 encryption with per-round intermediates). The model self-checks against the
 FIPS 197 Appendix B / C.1 / C.2 / C.3 known-answer vectors at import time, so
 any TB-side modeling mistake aborts the run before touching the DUT.
 
-DUT (cipher_top) interface notes:
-  - The TRNG is a real instance fed by raw_rand_bit (noise driver on
+DUT interface notes:
+  - cipher_top's TRNG is a real instance fed by raw_rand_bit (noise driver on
     sampling_clk). The cipher stalls its SubBytes rounds until trng_key_valid,
     so no explicit TRNG warm-up is needed -- just a generous timeout.
-  - cipher now has an active-low enb_n (mirroring invCipher's enable): an ICG
-    cell gates cipher.sv's own clock off entirely while enb_n=1, so the FSM
-    makes no progress at all while parked (same power-saving pattern already
-    used by invCipher.sv). enb_n=0 must be driven to start an encryption of
-    whatever is on `state`/`master_key`/`key_size`; after cipher_done it wraps
-    round_cntr to 0 and starts over. Back-to-back encryption works by keeping
-    enb_n=0 and swapping `state` after a done pulse.
-  - reset_dut() leaves the DUT parked (enb_n=1, key_size=2'b00); run_encryption()
-    drives enb_n=0 (together with master_key/key_size) to start.
-  - Only cipher_state/cipher_done are top-level ports now (rand_num/
-    sbox_ready/trng_key_valid/trng_dead_flag became internal wires of
-    cipher_top rather than ports -- same convention already used in
-    addRoundKey_top). Verilator's --public-flat-rw still exposes internal
-    signals directly by name, so dut.trng_key_valid / dut.trng_dead_flag
-    below keep working unchanged.
+    unmasked_cipher has no TRNG at all: its SBox is a LUT, so it never stalls.
+  - Both ciphers have an active-low enb_n: an ICG cell gates the cipher's own
+    clock off entirely while enb_n=1, so the FSM makes no progress at all while
+    parked (the power-saving pattern also used by invCipher.sv). enb_n=0 must be
+    driven to start an encryption of whatever is on `state`/`master_key`
+    (/`key_size` on cipher_top); after cipher_done the round counter wraps to 0
+    and it starts over. Back-to-back encryption works by keeping enb_n=0 and
+    swapping `state` after a done pulse.
+  - reset_dut() leaves the DUT parked (enb_n=1, and key_size=2'b00 where that
+    port exists); run_encryption() drives enb_n=0 to start.
+  - On cipher_top only cipher_state/cipher_done are top-level ports (rand_num/
+    sbox_ready/trng_key_valid/trng_dead_flag are internal wires of cipher_top,
+    the same convention already used in addRoundKey_top). Verilator's
+    --public-flat-rw still exposes internal signals directly by name, so
+    dut.trng_key_valid / dut.trng_dead_flag below keep working unchanged.
 
-RTL data representation (same convention the addRoundKey TB validated):
+RTL data representation (same convention the addRoundKey TB validated, and
+identical for both flavors):
   - state_matrix_t = logic [3:0][3:0][7:0]: state[row][col] at bits (row*4+col)*8
   - Row convention: RTL row 3 = NIST row 0 (MSByte of a column word),
                     RTL row 0 = NIST row 3. Columns match NIST.
   - master_key packs NIST key-schedule word w[i] (big-endian bytes) at
     bits [32*i +: 32].
 
-Diagnostics: run_encryption() traces dut.CIPHER.round_cntr and captures
+Diagnostics: run_encryption() traces the cipher's round_cntr and captures
 temp_state at every round boundary, so a ciphertext mismatch is reported with
 the first cipher round where the DUT diverged from the NIST reference.
 
 Signal access notes (Verilator, --public-flat-rw):
-  - dut.cipher_state, dut.cipher_done, dut.trng_key_valid   -- top-level ports
-    or exposed internal wires (see note above)
-  - dut.CIPHER.round_cntr, dut.CIPHER.temp_state, dut.CIPHER.fsm_state
-  - dut.SBOX, dut.AddRoundKey -- sibling instances of CIPHER inside
-    cipher_top (not currently probed by this TB, but available if a future
-    test needs to inspect the shared SBox/AddRoundKey directly; note the
-    ALL-CAPS "SBOX" instance name, distinct from addRoundKey_top's "SBox")
+  - dut.cipher_state, dut.cipher_done                       -- top level, both flavors
+  - dut.trng_key_valid, dut.trng_dead_flag                  -- cipher_top only
+  - cipher_core(dut).{round_cntr, temp_state, fsm_state}    -- dut.CIPHER.* on
+    cipher_top, dut.* on unmasked_cipher
+  - dut.ark_done, dut.ark_enb_n                             -- both flavors (wires of
+    cipher_top / regs of unmasked_cipher)
+  - dut.SBOX, dut.AddRoundKey -- sibling instances of CIPHER inside cipher_top
+    (not currently probed by this TB, but available if a future test needs to
+    inspect the shared SBox/AddRoundKey directly; note the ALL-CAPS "SBOX"
+    instance name, distinct from addRoundKey_top's "SBox"). unmasked_cipher's
+    private key-expansion block is dut.AddRoundKey (addRoundKey_AES256).
 """
 
 import cocotb
+import os
 import random
 import logging
 from cocotb.clock import Clock
@@ -75,7 +97,47 @@ KEY_SIZE_128 = 0b01
 KEY_SIZE_192 = 0b10
 KEY_SIZE_256 = 0b11
 
+# key length in bytes -> key_size encoding on cipher_top's key_size port
+KEY_SIZE_CODE = {16: KEY_SIZE_128, 24: KEY_SIZE_192, 32: KEY_SIZE_256}
+
 _mon_log = logging.getLogger("cocotb.monitor")
+
+
+# DUT flavor selection
+#
+# `skip=` on @cocotb.test() is evaluated when this module is imported, before
+# any DUT handle exists, so the flavor has to come from the environment rather
+# than from port probing. cocotb exports COCOTB_TOPLEVEL (TOPLEVEL in the
+# pre-2.0 spelling) for exactly this. check_flavor() re-derives the flavor from
+# the real DUT handle at the start of every test and fails loudly on a mismatch,
+# so a stale/mis-set variable can never silently mis-configure the run.
+MASKED   = "masked"    # cipher_top      : masked SBox + TRNG, AES-128/192/256
+UNMASKED = "unmasked"  # unmasked_cipher : LUT SBox, no TRNG, AES-256 only
+
+_UNMASKED_TOPLEVELS = {"unmasked_cipher"}
+
+def _flavor_from_env():
+    top = (os.environ.get("COCOTB_TOPLEVEL") or os.environ.get("TOPLEVEL") or "").strip()
+    return UNMASKED if top in _UNMASKED_TOPLEVELS else MASKED
+
+DUT_FLAVOR  = _flavor_from_env()
+IS_UNMASKED = (DUT_FLAVOR == UNMASKED)
+
+# Key sizes this DUT can actually be asked for. unmasked_cipher hard-wires
+# Nr=14 and an AES-256-only key schedule (CBC-MAC / CTR_DRBG only ever need
+# 256-bit encryption), so the 128/192 known-answer tests are skipped there.
+SUPPORTED_KEY_BITS = (256,) if IS_UNMASKED else (128, 192, 256)
+
+def supports(key_bits):
+    return key_bits in SUPPORTED_KEY_BITS
+
+# Key size used by the two flavor-agnostic tests (back-to-back and random
+# stimulus). cipher_top keeps running those at AES-128 exactly as before;
+# unmasked_cipher runs them at its only supported size.
+GEN_KEY_BITS = 256 if IS_UNMASKED else 128
+GEN_KEY = (bytes.fromhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4")
+           if IS_UNMASKED else
+           bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c"))
 
 # NIST AES S-Box
 SBOX = [
@@ -218,6 +280,9 @@ def _model_self_check():
          "00112233445566778899aabbccddeeff", "dda97ca4864cdfe06eaf70a0ec0d7191"),
         ("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
          "00112233445566778899aabbccddeeff", "8ea2b7ca516745bfeafc49904b496089"),
+        # NIST SP 800-38A F.1.5 (AES-256 ECB) -- covers GEN_KEY on the unmasked flavor
+        ("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+         "6bc1bee22e409f96e93d7e117393172a", "f3eed1bdb5d2a03c064b5a7e3db181f8"),
     ]
     for key_hex, pt_hex, ct_hex in vectors:
         got = AESEncryptModel(bytes.fromhex(key_hex)).encrypt(list(bytes.fromhex(pt_hex)))
@@ -250,7 +315,7 @@ def hexs(b16):
     return "".join(f"{b:02x}" for b in b16)
 
 
-# Noise source for the real TRNG instance
+# Noise source for the real TRNG instance (cipher_top only)
 class NoiseBitBuffer:
     """Random bit stream for raw_rand_bit. Prefers the physics-based
     noise_source_model.py (on PYTHONPATH via the sim dir); falls back to a
@@ -282,51 +347,97 @@ async def noise_driver(dut, seed=None):
         dut.raw_rand_bit.value = buf.next_bit()
 
 
-# DUT control helpers
+# DUT adapter layer -- everything the two flavors do differently lives here
+def has_sig(handle, name):
+    """True when `name` exists under `handle`. cocotb raises AttributeError for
+    an unknown child, which is how the two port lists are told apart."""
+    try:
+        getattr(handle, name)
+        return True
+    except AttributeError:
+        return False
+
+def cipher_core(dut):
+    """Handle to the module owning round_cntr / temp_state / fsm_state.
+
+    On cipher_top the round FSM lives in the CIPHER child instance (SBox and
+    AddRoundKey are its siblings, not its children, because invCipher shares
+    them). unmasked_cipher is self-contained, so its FSM registers are on the
+    toplevel handle itself."""
+    return dut.CIPHER if has_sig(dut, "CIPHER") else dut
+
+def check_flavor(dut):
+    """Fail loudly if the import-time flavor disagrees with the real DUT.
+
+    The `skip=` decisions on the key-size known-answer tests were already made
+    from COCOTB_TOPLEVEL by the time any test body runs, so a mismatch here
+    means the run is mis-configured (wrong TOPLEVEL, or cipher_tb pointed at an
+    unexpected block) and every later result would be meaningless."""
+    actual = MASKED if has_sig(dut, "key_size") else UNMASKED
+    assert actual == DUT_FLAVOR, (
+        f"DUT flavor mismatch: this run was configured for '{DUT_FLAVOR}' from "
+        f"COCOTB_TOPLEVEL={os.environ.get('COCOTB_TOPLEVEL')!r}, but the DUT handle "
+        f"looks like '{actual}' (key_size port {'present' if actual == MASKED else 'absent'}). "
+        f"Check TOPLEVEL/block in the Makefile invocation.")
+    return actual
+
 def start_clocks(dut):
+    """Start clk, plus sampling_clk when the DUT embeds a TRNG."""
     cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
-    cocotb.start_soon(Clock(dut.sampling_clk, SCLK_PERIOD_NS, unit="ns").start())
+    if has_sig(dut, "sampling_clk"):
+        cocotb.start_soon(Clock(dut.sampling_clk, SCLK_PERIOD_NS, unit="ns").start())
+
+def start_noise(dut, seed=None):
+    """Start the raw_rand_bit noise driver; a no-op on the TRNG-less flavor."""
+    if has_sig(dut, "raw_rand_bit"):
+        cocotb.start_soon(noise_driver(dut, seed=seed))
 
 async def reset_dut(dut):
-    """Reset and park the DUT: enb_n=1 (disabled) and key_size=2'b00.
+    """Reset and park the DUT: enb_n=1 (disabled), and key_size=2'b00 where the
+    port exists.
 
     enb_n=0 is held DURING the reset pulse (not just rst_n=0), then raised to
-    1 the same cycle rst_n deasserts. cipher.sv's own registers -- round_cntr,
+    1 the same cycle rst_n deasserts. The cipher's own registers -- round_cntr,
     temp_state, fsm_state, ark_enb_n, etc. -- only update on its ICG-gated
-    clock, which only ticks while enb_n=0. A previous test can leave the
-    cipher enabled mid-computation (TC1 deliberately parks right after
-    trng_key_valid, well before cipher_done, to test the enable gate itself),
-    so if reset were asserted with enb_n=1 the whole time, the gated clock
-    would never tick and `if(!rst_n)` would never actually execute -- leaving
-    round_cntr/temp_state stuck at their last mid-computation values instead
-    of clearing. Enabling briefly during the reset pulse guarantees at least
-    one real gated-clock edge applies the clear before the DUT is parked.
+    clock. Both ciphers fold ~rst_n into that ICG enable so the clock does run
+    during reset regardless, but a previous test can leave the cipher enabled
+    mid-computation (TC1 deliberately parks partway through, to test the enable
+    gate itself), so enabling during the reset pulse guarantees the clear is
+    applied before the DUT is parked, without depending on that ICG detail.
     """
     dut.rst_n.value        = 0
     dut.state.value        = 0
     dut.master_key.value   = 0
-    dut.key_size.value     = 0   # parks the cipher in round 0 after reset
-    dut.enb_n.value        = 0  # briefly enabled so the gated clock ticks during reset
-    dut.raw_rand_bit.value = 0
+    if has_sig(dut, "key_size"):
+        dut.key_size.value = 0   # parks the cipher in round 0 after reset
+    dut.enb_n.value        = 0   # briefly enabled so the gated clock ticks during reset
+    if has_sig(dut, "raw_rand_bit"):
+        dut.raw_rand_bit.value = 0
     await ClockCycles(dut.clk, RESET_CYCLES)
     dut.rst_n.value = 1
     dut.enb_n.value = 1  # park the DUT now that the reset has actually applied
     await RisingEdge(dut.clk)
-    dut._log.info("DUT reset complete (parked: enb_n=1, key_size=0)")
+    dut._log.info(f"DUT reset complete ({DUT_FLAVOR} flavor; parked: enb_n=1"
+                  f"{', key_size=0' if has_sig(dut, 'key_size') else ''})")
 
 
 async def signal_monitor(dut, label=""):
     """Log cipher FSM / round transitions (low-volume debug aid)."""
     pfx = f"[MON {label}]" if label else "[MON]"
+    core = cipher_core(dut)
+    trng = has_sig(dut, "trng_key_valid")
 
     def snap():
-        return {
-            "round_cntr"     : int(dut.CIPHER.round_cntr.value),
-            "fsm_state"      : int(dut.CIPHER.fsm_state.value),
-            "cipher_done"    : int(dut.cipher_done.value),
-            "trng_key_valid" : int(dut.trng_key_valid.value),
-            "trng_dead_flag" : int(dut.trng_dead_flag.value),
+        s = {
+            "round_cntr"  : int(core.round_cntr.value),
+            "fsm_state"   : int(core.fsm_state.value),
+            "cipher_done" : int(dut.cipher_done.value),
+            "ark_done"    : int(dut.ark_done.value),
         }
+        if trng:
+            s["trng_key_valid"] = int(dut.trng_key_valid.value)
+            s["trng_dead_flag"] = int(dut.trng_dead_flag.value)
+        return s
 
     await RisingEdge(dut.clk)
     prev = snap()
@@ -342,7 +453,17 @@ async def signal_monitor(dut, label=""):
         prev = cur
 
 
-async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
+async def bringup(dut, seed, monitor_label=None):
+    """Standard per-test bring-up: flavor check, clocks, noise, reset, monitor."""
+    check_flavor(dut)
+    start_clocks(dut)
+    start_noise(dut, seed=seed)
+    await reset_dut(dut)
+    if monitor_label:
+        cocotb.start_soon(signal_monitor(dut, label=monitor_label))
+
+
+async def run_encryption(dut, key_bytes, pt_bytes, key_size_code=None,
                          timeout=ENCRYPT_TIMEOUT, already_running=False,
                          next_pt_bytes=None):
     """Drive one encryption and wait for cipher_done.
@@ -351,10 +472,15 @@ async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
     dut_round_trace is a list of (round_cntr, temp_state_int) captured at every
     round boundary -- temp_state holds that round's addRoundKey output.
 
+    key_size_code defaults to the encoding implied by len(key_bytes); it is only
+    driven on DUTs that actually have a key_size port (unmasked_cipher hard-wires
+    AES-256, so it has none). Asking a DUT for an unsupported size is rejected
+    here rather than silently producing a bogus mismatch downstream.
+
     If already_running (back-to-back test), only `state` is updated; the DUT
     picks it up when its internal round counter wraps to 0.
 
-    next_pt_bytes: for chaining a second back-to-back block. cipher.sv samples
+    next_pt_bytes: for chaining a second back-to-back block. The cipher samples
     `state` into `ark_state` on essentially every cycle round_cntr==0 is
     active, starting the very cycle round_cntr wraps -- reacting to
     cipher_done and only then driving the next plaintext lands one cycle too
@@ -362,28 +488,37 @@ async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
     cycle round_cntr first reaches Nr (the final round), well before
     cipher_done, so it's already settled by the time round_cntr wraps.
     """
+    key_bits = len(key_bytes) * 8
+    assert supports(key_bits), (
+        f"AES-{key_bits} requested but the '{DUT_FLAVOR}' DUT only supports "
+        f"{'/'.join(str(k) for k in SUPPORTED_KEY_BITS)}-bit keys")
+    if key_size_code is None:
+        key_size_code = KEY_SIZE_CODE[len(key_bytes)]
+
     model = AESEncryptModel(key_bytes)
     ct_expect, trace = model.encrypt_trace(list(pt_bytes))
+    core = cipher_core(dut)
 
-    # Present the plaintext BEFORE key_size becomes valid: the cipher's round-0
-    # handshake raises ark_done one cycle after key_size is valid, and the
+    # Present the plaintext BEFORE the start condition: the cipher's round-0
+    # handshake raises ark_done one cycle after it is enabled, and the
     # addRoundKey input register (ark_state) needs a cycle to pick up `state`.
     dut.state.value = nist_bytes_to_rtl_state(list(pt_bytes))
     if not already_running:
         await ClockCycles(dut.clk, 2)
         dut.master_key.value = model.master_key_rtl_int()
-        dut.key_size.value   = key_size_code
-        dut.enb_n.value      = 0
+        if has_sig(dut, "key_size"):
+            dut.key_size.value = key_size_code
+        dut.enb_n.value = 0
 
     dut_rounds = []
-    prev_round = int(dut.CIPHER.round_cntr.value)
+    prev_round = int(core.round_cntr.value)
     next_state_driven = next_pt_bytes is None
     for _ in range(timeout):
         await RisingEdge(dut.clk)
-        cur_round = int(dut.CIPHER.round_cntr.value)
+        cur_round = int(core.round_cntr.value)
         if cur_round != prev_round:
             # temp_state just captured round prev_round's addRoundKey output
-            dut_rounds.append((prev_round, int(dut.CIPHER.temp_state.value)))
+            dut_rounds.append((prev_round, int(core.temp_state.value)))
             prev_round = cur_round
         if not next_state_driven and cur_round == model.Nr:
             dut.state.value = nist_bytes_to_rtl_state(list(next_pt_bytes))
@@ -391,12 +526,16 @@ async def run_encryption(dut, key_bytes, pt_bytes, key_size_code,
         if int(dut.cipher_done.value) == 1:
             ct_rtl = int(dut.cipher_state.value)
             return rtl_state_to_nist_bytes(ct_rtl), model, trace, dut_rounds
+
+    extra = ""
+    if has_sig(dut, "trng_key_valid"):
+        extra = (f", trng_key_valid={int(dut.trng_key_valid.value)}"
+                 f", trng_dead_flag={int(dut.trng_dead_flag.value)}")
     raise AssertionError(
         f"TIMEOUT ({timeout} cycles): cipher_done never asserted "
-        f"(round_cntr={int(dut.CIPHER.round_cntr.value)}, "
-        f"enb_n={int(dut.enb_n.value)}, "
-        f"trng_key_valid={int(dut.trng_key_valid.value)}, "
-        f"trng_dead_flag={int(dut.trng_dead_flag.value)})")
+        f"(round_cntr={int(core.round_cntr.value)}, "
+        f"fsm_state={int(core.fsm_state.value)}, "
+        f"enb_n={int(dut.enb_n.value)}{extra})")
 
 
 def report_round_divergence(dut, model, trace, dut_rounds):
@@ -429,30 +568,41 @@ def report_round_divergence(dut, model, trace, dut_rounds):
     return first_bad
 
 
-# TC1: Reset & TRNG liveness
-@cocotb.test()
-async def tc1_reset_and_trng_liveness(dut):
-    """TC1: outputs are zero after reset and the cipher stays parked while
-    enb_n=1. Once the cipher is actually enabled (enb_n=0, key_size valid) --
-    as any real controller driving this AES engine would do -- the embedded
-    TRNG comes alive on its own (noise source -> health tests -> Keccak) and
-    trng_key_valid asserts. The cipher is then parked again.
+def check_ct(dut, what, ct_dut, model, trace, dut_rounds):
+    """Compare a DUT ciphertext against the model, dumping the per-round trace
+    on mismatch before failing."""
+    ct_ref = trace[-1]["after_ark"]
+    dut._log.info(f"  {what}: DUT={hexs(ct_dut)}  NIST={hexs(ct_ref)}")
+    if ct_dut != ct_ref:
+        report_round_divergence(dut, model, trace, dut_rounds)
+        raise AssertionError(
+            f"{what} ciphertext mismatch: DUT={hexs(ct_dut)} NIST={hexs(ct_ref)}")
 
-    Note: cipher.sv's own clock is gated off entirely while enb_n=1 (an ICG
-    cell, same power-saving pattern already used by invCipher.sv), so the
-    FSM -- and therefore the shared SBox it would otherwise drive -- makes no
+
+# TC1: Reset, enable gating & (masked only) TRNG liveness
+@cocotb.test()
+async def tc1_reset_and_liveness(dut):
+    """TC1: outputs are zero after reset and the cipher stays parked while
+    enb_n=1. Once the cipher is actually enabled -- as any real controller
+    driving this AES engine would do -- it comes alive: on cipher_top the
+    embedded TRNG starts up on its own (noise source -> health tests -> Keccak)
+    and trng_key_valid asserts; on unmasked_cipher there is no TRNG, so liveness
+    is the round counter leaving round 0. The cipher is then parked again.
+
+    Note: the cipher's own clock is gated off entirely while enb_n=1 (an ICG
+    cell, the same power-saving pattern used by invCipher.sv), so the FSM --
+    and, on cipher_top, the shared SBox it would otherwise drive -- makes no
     progress in that state. That's expected: a power-gated block making no
     progress while nothing enables it isn't a bug, it's the point of the
-    gating. So TRNG liveness is checked during actual operation, not while
+    gating. So liveness is checked during actual operation, not while
     deliberately parked. (Same reasoning as invCipher_tb's TC1.)
     """
     dut._log.info("=" * 60)
-    dut._log.info("TC1: Reset behavior + TRNG liveness")
+    dut._log.info(f"TC1: Reset behavior + liveness ({DUT_FLAVOR} cipher)")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=1001))
-    await reset_dut(dut)
+    await bringup(dut, seed=1001)
+    core = cipher_core(dut)
 
     assert int(dut.cipher_state.value) == 0, \
         f"cipher_state not zero after reset: 0x{int(dut.cipher_state.value):032x}"
@@ -463,228 +613,215 @@ async def tc1_reset_and_trng_liveness(dut):
     await ClockCycles(dut.clk, 20)
     assert int(dut.cipher_done.value) == 0, \
         "cipher_done asserted while cipher is disabled (enb_n=1)"
-    assert int(dut.CIPHER.round_cntr.value) == 0, \
+    assert int(core.round_cntr.value) == 0, \
         "cipher advanced past round 0 while disabled (enb_n=1)"
     dut._log.info(" cipher stays parked while enb_n=1")
 
     # Now actually enable the cipher (a real controller would do this to use
-    # the AES engine) and confirm the TRNG comes alive on its own.
-    dut.master_key.value = 0x2b7e151628aed2a6abf7158809cf4f3c
-    dut.state.value      = 0x3243f6a8885a308d313198a2e0370734
-    dut.key_size.value   = KEY_SIZE_128
-    dut.enb_n.value      = 0
-    dut._log.info(" cipher enabled (enb_n=0, key_size=2'b01) -- waiting for TRNG liveness")
+    # the AES engine) and confirm it comes alive.
+    key = GEN_KEY
+    model = AESEncryptModel(key)
+    dut.master_key.value = model.master_key_rtl_int()
+    dut.state.value      = nist_bytes_to_rtl_state(list(bytes.fromhex(
+        "3243f6a8885a308d313198a2e0370734")))
+    if has_sig(dut, "key_size"):
+        dut.key_size.value = KEY_SIZE_CODE[len(key)]
+    dut.enb_n.value = 0
+    dut._log.info(f" cipher enabled (enb_n=0, AES-{GEN_KEY_BITS}) -- waiting for liveness")
 
-    for i in range(20000):
-        await RisingEdge(dut.clk)
-        if int(dut.trng_key_valid.value) == 1:
-            dut._log.info(f" trng_key_valid asserted after {i+1} cycles")
-            break
+    if has_sig(dut, "trng_key_valid"):
+        for i in range(20000):
+            await RisingEdge(dut.clk)
+            if int(dut.trng_key_valid.value) == 1:
+                dut._log.info(f" trng_key_valid asserted after {i+1} cycles")
+                break
+        else:
+            raise AssertionError("TIMEOUT: trng_key_valid never asserted (20000 cycles)")
+        assert int(dut.trng_dead_flag.value) == 0, "trng_dead_flag asserted with live noise"
     else:
-        raise AssertionError("TIMEOUT: trng_key_valid never asserted (20000 cycles)")
-
-    assert int(dut.trng_dead_flag.value) == 0, "trng_dead_flag asserted with live noise"
+        # No TRNG to wait on: the LUT SBox never stalls, so the round FSM must
+        # start advancing within a handful of cycles of being enabled.
+        for i in range(100):
+            await RisingEdge(dut.clk)
+            if int(core.round_cntr.value) != 0:
+                dut._log.info(f" round_cntr left round 0 after {i+1} cycles "
+                              f"(now {int(core.round_cntr.value)})")
+                break
+        else:
+            raise AssertionError(
+                "TIMEOUT: round_cntr never left round 0 after enabling the cipher "
+                "(100 cycles) -- the round FSM is not advancing")
 
     # Park the cipher again so TC1 leaves the engine in a clean disabled state
-    dut.enb_n.value    = 1
-    dut.key_size.value = 0
+    dut.enb_n.value = 1
+    if has_sig(dut, "key_size"):
+        dut.key_size.value = 0
     await ClockCycles(dut.clk, 4)
     dut._log.info(" cipher parked again (enb_n=1)")
     dut._log.info(" TC1 PASSED")
 
 
 # TC2: AES-128, FIPS 197 Appendix B vector
-@cocotb.test()
+@cocotb.test(skip=not supports(128))
 async def tc2_aes128_appendix_b(dut):
     """TC2: AES-128 known-answer test, FIPS 197 Appendix B.
-    key=2b7e1516... pt=3243f6a8... → ct=3925841d02dc09fbdc118597196a0b32"""
+    key=2b7e1516... pt=3243f6a8... → ct=3925841d02dc09fbdc118597196a0b32
+    Skipped on unmasked_cipher (AES-256 only)."""
     dut._log.info("=" * 60)
     dut._log.info("TC2: AES-128 FIPS 197 Appendix B")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=2002))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC2"))
+    await bringup(dut, seed=2002, monitor_label="TC2")
 
     key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
     pt  = bytes.fromhex("3243f6a8885a308d313198a2e0370734")
-
-    ct_dut, model, trace, dut_rounds = await run_encryption(dut, key, pt, KEY_SIZE_128)
-    ct_ref = trace[-1]["after_ark"]
-
     dut._log.info(f"  plaintext : {pt.hex()}")
     dut._log.info(f"  key       : {key.hex()}")
-    dut._log.info(f"  DUT   ct  : {hexs(ct_dut)}")
-    dut._log.info(f"  NIST  ct  : {hexs(ct_ref)}")
 
-    if ct_dut != ct_ref:
-        report_round_divergence(dut, model, trace, dut_rounds)
-        raise AssertionError(
-            f"AES-128 Appendix B ciphertext mismatch: DUT={hexs(ct_dut)} NIST={hexs(ct_ref)}")
-
+    check_ct(dut, "AES-128 Appendix B", *await run_encryption(dut, key, pt))
     dut._log.info(" TC2 PASSED")
 
 
 # TC3: AES-128, FIPS 197 Appendix C.1 vector
-@cocotb.test()
+@cocotb.test(skip=not supports(128))
 async def tc3_aes128_c1(dut):
-    """TC3: AES-128 known-answer test, FIPS 197 Appendix C.1."""
+    """TC3: AES-128 known-answer test, FIPS 197 Appendix C.1
+    (expect ct=69c4e0d86a7b0430d8cdb78070b4c55a).
+    Skipped on unmasked_cipher (AES-256 only)."""
     dut._log.info("=" * 60)
     dut._log.info("TC3: AES-128 FIPS 197 Appendix C.1")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=3003))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC3"))
+    await bringup(dut, seed=3003, monitor_label="TC3")
 
     key = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
     pt  = bytes.fromhex("00112233445566778899aabbccddeeff")
 
-    ct_dut, model, trace, dut_rounds = await run_encryption(dut, key, pt, KEY_SIZE_128)
-    ct_ref = trace[-1]["after_ark"]
-
-    dut._log.info(f"  DUT  ct: {hexs(ct_dut)}")
-    dut._log.info(f"  NIST ct: {hexs(ct_ref)} (expect 69c4e0d86a7b0430d8cdb78070b4c55a)")
-
-    if ct_dut != ct_ref:
-        report_round_divergence(dut, model, trace, dut_rounds)
-        raise AssertionError(
-            f"AES-128 C.1 ciphertext mismatch: DUT={hexs(ct_dut)} NIST={hexs(ct_ref)}")
-
+    check_ct(dut, "AES-128 C.1", *await run_encryption(dut, key, pt))
     dut._log.info(" TC3 PASSED")
 
 
 # TC4: AES-192, FIPS 197 Appendix C.2 vector
-@cocotb.test()
+@cocotb.test(skip=not supports(192))
 async def tc4_aes192_c2(dut):
-    """TC4: AES-192 known-answer test, FIPS 197 Appendix C.2."""
+    """TC4: AES-192 known-answer test, FIPS 197 Appendix C.2
+    (expect ct=dda97ca4864cdfe06eaf70a0ec0d7191).
+    Skipped on unmasked_cipher (AES-256 only)."""
     dut._log.info("=" * 60)
     dut._log.info("TC4: AES-192 FIPS 197 Appendix C.2")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=4004))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC4"))
+    await bringup(dut, seed=4004, monitor_label="TC4")
 
     key = bytes.fromhex("000102030405060708090a0b0c0d0e0f1011121314151617")
     pt  = bytes.fromhex("00112233445566778899aabbccddeeff")
 
-    ct_dut, model, trace, dut_rounds = await run_encryption(dut, key, pt, KEY_SIZE_192)
-    ct_ref = trace[-1]["after_ark"]
-
-    dut._log.info(f"  DUT  ct: {hexs(ct_dut)}")
-    dut._log.info(f"  NIST ct: {hexs(ct_ref)} (expect dda97ca4864cdfe06eaf70a0ec0d7191)")
-
-    if ct_dut != ct_ref:
-        report_round_divergence(dut, model, trace, dut_rounds)
-        raise AssertionError(
-            f"AES-192 C.2 ciphertext mismatch: DUT={hexs(ct_dut)} NIST={hexs(ct_ref)}")
-
+    check_ct(dut, "AES-192 C.2", *await run_encryption(dut, key, pt))
     dut._log.info(" TC4 PASSED")
 
 
 # TC5: AES-256, FIPS 197 Appendix C.3 vector
-@cocotb.test()
+@cocotb.test(skip=not supports(256))
 async def tc5_aes256_c3(dut):
-    """TC5: AES-256 known-answer test, FIPS 197 Appendix C.3."""
+    """TC5: AES-256 known-answer test, FIPS 197 Appendix C.3
+    (expect ct=8ea2b7ca516745bfeafc49904b496089).
+    Runs on both flavors -- this is the primary known-answer test for
+    unmasked_cipher, which is AES-256 only."""
     dut._log.info("=" * 60)
     dut._log.info("TC5: AES-256 FIPS 197 Appendix C.3")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=5005))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC5"))
+    await bringup(dut, seed=5005, monitor_label="TC5")
 
     key = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
     pt  = bytes.fromhex("00112233445566778899aabbccddeeff")
 
-    ct_dut, model, trace, dut_rounds = await run_encryption(dut, key, pt, KEY_SIZE_256)
-    ct_ref = trace[-1]["after_ark"]
-
-    dut._log.info(f"  DUT  ct: {hexs(ct_dut)}")
-    dut._log.info(f"  NIST ct: {hexs(ct_ref)} (expect 8ea2b7ca516745bfeafc49904b496089)")
-
-    if ct_dut != ct_ref:
-        report_round_divergence(dut, model, trace, dut_rounds)
-        raise AssertionError(
-            f"AES-256 C.3 ciphertext mismatch: DUT={hexs(ct_dut)} NIST={hexs(ct_ref)}")
-
+    check_ct(dut, "AES-256 C.3", *await run_encryption(dut, key, pt))
     dut._log.info(" TC5 PASSED")
 
 
 # TC6: back-to-back encryptions (same key)
 @cocotb.test()
 async def tc6_back_to_back(dut):
-    """TC6: two consecutive AES-128 encryptions without reset. After
-    cipher_done the round counter wraps and the DUT re-encrypts whatever is on
-    `state`; swap in a new plaintext and check the second ciphertext too."""
+    """TC6: two consecutive encryptions without reset. After cipher_done the
+    round counter wraps and the DUT re-encrypts whatever is on `state`; swap in
+    a new plaintext and check the second ciphertext too.
+
+    Runs at AES-128 on cipher_top and AES-256 on unmasked_cipher (GEN_KEY)."""
     dut._log.info("=" * 60)
-    dut._log.info("TC6: Back-to-back AES-128 encryptions")
+    dut._log.info(f"TC6: Back-to-back AES-{GEN_KEY_BITS} encryptions")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=6006))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC6"))
+    await bringup(dut, seed=6006, monitor_label="TC6")
 
-    key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    key = GEN_KEY
     pt1 = bytes.fromhex("3243f6a8885a308d313198a2e0370734")
     pt2 = bytes.fromhex("00112233445566778899aabbccddeeff")
 
-    ct1, model, trace1, rounds1 = await run_encryption(
-        dut, key, pt1, KEY_SIZE_128, next_pt_bytes=pt2)
-    ref1 = trace1[-1]["after_ark"]
-    dut._log.info(f"  Block 1: DUT={hexs(ct1)}  NIST={hexs(ref1)}")
-    if ct1 != ref1:
-        report_round_divergence(dut, model, trace1, rounds1)
-        raise AssertionError(f"Block 1 mismatch: DUT={hexs(ct1)} NIST={hexs(ref1)}")
+    check_ct(dut, "Block 1",
+             *await run_encryption(dut, key, pt1, next_pt_bytes=pt2))
 
     # `state` for block 2 was already driven proactively (see next_pt_bytes
-    # above) during block 1's final round -- cipher.sv samples `state` into
+    # above) during block 1's final round -- the cipher samples `state` into
     # ark_state starting the very cycle round_cntr wraps, so reacting to
     # cipher_done here and driving state only now would be one cycle too late.
-    ct2, model, trace2, rounds2 = await run_encryption(
-        dut, key, pt2, KEY_SIZE_128, already_running=True)
-    ref2 = trace2[-1]["after_ark"]
-    dut._log.info(f"  Block 2: DUT={hexs(ct2)}  NIST={hexs(ref2)}")
-    if ct2 != ref2:
-        report_round_divergence(dut, model, trace2, rounds2)
-        raise AssertionError(f"Block 2 mismatch: DUT={hexs(ct2)} NIST={hexs(ref2)}")
+    check_ct(dut, "Block 2",
+             *await run_encryption(dut, key, pt2, already_running=True))
 
     dut._log.info(" TC6 PASSED")
 
 
 # TC7: random stimulus vs reference model
 @cocotb.test()
-async def tc7_random_aes128(dut):
-    """TC7: random AES-128 key/plaintext checked against the reference model."""
+async def tc7_random_vector(dut):
+    """TC7: a random key/plaintext checked against the reference model.
+    Runs at AES-128 on cipher_top and AES-256 on unmasked_cipher."""
     dut._log.info("=" * 60)
-    dut._log.info("TC7: Random AES-128 vector vs reference model")
+    dut._log.info(f"TC7: Random AES-{GEN_KEY_BITS} vector vs reference model")
     dut._log.info("=" * 60)
 
-    start_clocks(dut)
-    cocotb.start_soon(noise_driver(dut, seed=7007))
-    await reset_dut(dut)
-    cocotb.start_soon(signal_monitor(dut, label="TC7"))
+    await bringup(dut, seed=7007, monitor_label="TC7")
 
     rng = random.Random(0xAE5)
-    key = bytes(rng.getrandbits(8) for _ in range(16))
+    key = bytes(rng.getrandbits(8) for _ in range(GEN_KEY_BITS // 8))
     pt  = bytes(rng.getrandbits(8) for _ in range(16))
     dut._log.info(f"  key: {key.hex()}  pt: {pt.hex()}")
 
-    ct_dut, model, trace, dut_rounds = await run_encryption(dut, key, pt, KEY_SIZE_128)
-    ct_ref = trace[-1]["after_ark"]
-
-    dut._log.info(f"  DUT  ct: {hexs(ct_dut)}")
-    dut._log.info(f"  model ct: {hexs(ct_ref)}")
-
-    if ct_dut != ct_ref:
-        report_round_divergence(dut, model, trace, dut_rounds)
-        raise AssertionError(
-            f"Random-vector ciphertext mismatch: DUT={hexs(ct_dut)} model={hexs(ct_ref)}")
-
+    check_ct(dut, f"Random AES-{GEN_KEY_BITS}",
+             *await run_encryption(dut, key, pt))
     dut._log.info(" TC7 PASSED")
+
+
+# TC8: AES-256 random sweep -- several independent key/plaintext pairs
+@cocotb.test(skip=not supports(256))
+async def tc8_aes256_random_sweep(dut):
+    """TC8: several independent AES-256 encryptions, each with a fresh random
+    key and plaintext and a reset in between, checked against the reference
+    model. AES-256 is the only mode unmasked_cipher implements (CBC-MAC and
+    CTR_DRBG both need it), so this widens the key-schedule coverage well past
+    the single Appendix C.3 vector -- in particular it exercises the i%8==0
+    (RotWord+Rcon) and i%8==4 (SubWord-only) key-expansion branches with many
+    different key words."""
+    n_blocks = 4 if IS_UNMASKED else 2  # the masked SBox is far slower per round
+    dut._log.info("=" * 60)
+    dut._log.info(f"TC8: {n_blocks} random AES-256 vectors vs reference model")
+    dut._log.info("=" * 60)
+
+    # Clocks and the noise driver are started exactly once: cocotb kills a
+    # test's tasks when it ends, but within one test a second Clock on dut.clk
+    # would fight the first. Blocks after the first re-reset instead, which
+    # parks the cipher and clears its round FSM before the next key is loaded.
+    await bringup(dut, seed=8008, monitor_label="TC8")
+
+    rng = random.Random(0x256AE5)
+    for blk in range(n_blocks):
+        if blk:
+            await reset_dut(dut)
+        key = bytes(rng.getrandbits(8) for _ in range(32))
+        pt  = bytes(rng.getrandbits(8) for _ in range(16))
+        dut._log.info(f"  [{blk}] key: {key.hex()}")
+        dut._log.info(f"  [{blk}] pt : {pt.hex()}")
+        check_ct(dut, f"Random AES-256 #{blk}",
+                 *await run_encryption(dut, key, pt))
+
+    dut._log.info(" TC8 PASSED")
