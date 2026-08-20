@@ -22,6 +22,14 @@ SHELL := /bin/bash
 # Cocotb setup
 SIM = verilator
 
+# Per-block build directory. cocotb's Makefile.sim keys its incremental rebuild
+# on source mtimes, not on the elaborated top module, so a single shared
+# sim_build/ silently reuses the previous block's binary when $(block) changes
+# and cocotb then aborts with "Can not find root handle '<block>'". Giving each
+# block its own directory keeps the incremental rebuild while making a block
+# switch a different build.
+SIM_BUILD := sim_build/$(block)
+
 # Tools 
 VERIBLE_LINT = verible-verilog-lint
 SLANG = slang
@@ -271,7 +279,7 @@ sta:
 clean_all: clean
 	rm -f ./*.vcd ./*.fst ./*.log ./*.xml
 	rm -rf sim_build ./.cache* obj_dir
-	rm -rf $(TB_DIR)/__pycache__  # Remove any Python cache from source directory
+	rm -rf $(TB_DIR)/__pycache__
 	rm -rf $(SYNTH_REPORT_DIR)/
 	rm -rf $(STA_REPORT_DIR)/
 	rm -rf $(LINT_REPORT_DIR)/

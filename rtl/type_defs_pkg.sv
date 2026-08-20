@@ -57,6 +57,7 @@ package type_defs_pkg;
     typedef enum logic [1:0] {
         CONSUME,
         OPERATE,
+        RELEASE,
         ERROR
     } cbc_mac_states;
 endpackage
