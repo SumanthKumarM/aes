@@ -39,18 +39,24 @@ The IV Generator is designed against the following priority order:
                                             │
                                             ▼
         Noise Source (independent instance — separate from the Sbox-masking TRNG's source)
-                                            │
+                                            │   1 raw bit per sampling cycle
                                             ▼
                                 Health Tests (RCT + APT)
                                             │
                                             ▼
-                                256-bit Entropy Collector
+              128-bit Entropy Collector (SIPO, 128 sampling cycles per fill)
                                             │
                                             ▼
         CBC-MAC Conditioner (AES-256, unmasked Sbox, 2 chained encryptions per call)
                                             │
                                             ▼
               128-bit Conditioned Block  (full-entropy, per SP 800-90C §3.2.2.2)
+                                            │
+                                            │   x3 — V re-zeroed per call, so the three
+                                            │   blocks are independent CBC-MACs, not one
+                                            │   chained MAC (6 fills, 6 AES per seed)
+                                            ▼
+              384-bit Conditioned Seed  (seedlen = blocklen + keylen = 128 + 256)
                                             │
                                             ▼
               CTR_DRBG  (AES-256, No-DF, unmasked Sbox, reseed_interval = 1024)
@@ -80,11 +86,13 @@ source structure and output rate described in `trng.adoc` for the Sbox-masking T
 
 === Latency Justification
 
-The entropy collector requires 256 raw bits per conditioning call (see
-<<entropy-collector-width>>). At 1 bit/cycle and 150 MHz, filling the collector takes 256
-cycles, ≈ 1.71 µs. Entropy collection and conditioning execute only during CTR_DRBG instantiate
-and reseed — once per `reseed_interval = 1024` `Generate()` calls, never on the per-IV path — so
-this latency is amortized across many IV outputs and is not on the per-IV critical path.
+Each conditioning call consumes 256 raw bits — two 128-bit collector fills — and three calls are
+required to build the 384-bit CTR_DRBG seed (see <<entropy-collector-width>>), for 768 raw bits
+per instantiate or reseed. At 1 bit/cycle and 150 MHz that is 768 sampling cycles, ≈ 5.12 µs of
+collection, alongside the 6 AES-256 encryptions the three CBC-MAC calls cost. Entropy collection
+and conditioning execute only during CTR_DRBG instantiate and reseed — once per
+`reseed_interval = 1024` `Generate()` calls, never on the per-IV path — so this latency is
+amortized across many IV outputs and is not on the per-IV critical path.
 
 === Independence from the Sbox-Masking TRNG
 
@@ -110,15 +118,26 @@ Reuse is verbatim — no modification to the module and no change to `RCT_THRESH
 expects: one raw bit per sampling clock, drawn from a full 32-oscillator XOR tree carrying the
 same characterized min-entropy the thresholds were derived from.
 
-NOTE: The APT window is 1024 bits, four times the depth of the 256-bit entropy collector. A
-window therefore cannot complete within a single collection burst, so the health tests must run
-continuously on the raw bit stream — as they do in `trng.sv`'s BIST state — rather than only
-while the collector is filling.
+NOTE: The APT window is 1024 bits — eight times the depth of the 128-bit entropy collector, and
+wider still than the 768 raw bits a complete 384-bit seed consumes. A window therefore cannot
+complete within a single collection burst, nor even within one full seed's worth of collection,
+so the health tests must run continuously on the raw bit stream — as they do in `trng.sv`'s BIST
+state — rather than only while the collector is filling.
 
 [[entropy-collector-width]]
 == Entropy Collector
 
-=== Width Decision
+=== Collector Width
+
+The collector is a 128-bit serial-in/parallel-out shift register (`entropy_clctr #(128)` in
+`drbg_utilities.sv`), filled one raw bit per sampling cycle and handed to the conditioner across
+a valid/ready handshake. It is one AES block wide rather than one full conditioning input wide:
+CBC-MAC consumes its input a block at a time regardless, so a 128-bit register feeds the cipher
+directly with no wider staging buffer, and a single collector instance is reused for every block
+of every call. The amount of entropy per conditioning call is therefore set by how many times
+the collector is drained, not by its width.
+
+=== Per-Call Entropy Budget
 
 The CTR_DRBG no-derivation-function instantiate mode requires its `seed_material` to carry full
 entropy — min-entropy per bit ≈ 1. SP 800-90C §3.2.2.2 specifies that the entropy required per
@@ -130,20 +149,42 @@ required min-entropy per conditioning call = 128 + 64 = 192 bits
 ----
 
 This is a min-entropy figure, not a raw bit count; real noise sources deliver less than one bit
-of min-entropy per raw bit sampled. The entropy collector width is set to 256 bits, above the
-192-bit theoretical floor, for the following reasons:
+of min-entropy per raw bit sampled. Each conditioning call is fed 256 raw bits — two collector
+fills, hence exactly two CBC-MAC iterations — which sits above the 192-bit floor for the
+following reasons:
 
-* Power-of-two width for register and bus alignment.
+* Two fills per call is a fixed, predictable cost with no branching on input length, and yields
+  an input that is an exact multiple of the AES block size — the one restriction CBC-MAC imposes
+  as an external conditioning function.
 * Margin above the 192-bit floor to absorb measurement uncertainty in the noise source's
   actual min-entropy per bit.
-* Exactly two CBC-MAC iterations per conditioning call — a fixed, predictable cost with no
-  branching on input length.
-* Collecting substantially more than 256 bits does not increase the security of the final
-  128-bit conditioned output while increasing conditioning latency for no offsetting benefit.
+* Collecting substantially more than 256 bits per call does not increase the security of that
+  call's 128-bit conditioned output, while increasing conditioning latency for no offsetting
+  benefit.
 
-Formal characterization of the noise source's actual min-entropy per bit (an SP 800-90B
-estimation exercise, consistent with the parameters in `aes/sim/gen_param.py`) is required to
-confirm this margin holds against the physical implementation; see <<verification-items>>.
+=== Per-Seed Entropy Budget
+
+The No-DF CTR_DRBG needs a full `seedlen` of full-entropy seed material, so one conditioning
+call is not sufficient: a 384-bit seed is three independent conditioned blocks. A complete
+instantiate or reseed therefore costs:
+
+----
+raw bits collected   = 3 calls x 2 fills x 128 bits = 768 bits
+min-entropy required = 3 calls x 192 bits           = 576 bits
+implied requirement  = 576 / 768                    = 0.75 min-entropy per raw bit
+----
+
+The noise source must deliver at least 0.75 bits of min-entropy per raw sampled bit for the
+resulting seed to qualify as full-entropy. Formal characterization of the actual figure (an
+SP 800-90B estimation exercise, consistent with the parameters in `aes/sim/gen_param.py`) is
+required to confirm this bound holds against the physical implementation; see
+<<verification-items>>.
+
+The chaining value `V` is re-zeroed at the start of each of the three calls, so the blocks are
+three independent CBC-MACs rather than one chained MAC over six blocks. This keeps each block's
+entropy argument self-contained: each is a separate SP 800-90C §3.2.2.2 conditioning call
+meeting the 192-bit requirement on its own, rather than one call whose input length would exceed
+what that clause is written for.
 
 == Conditioning Function — CBC-MAC
 
@@ -195,8 +236,8 @@ ____
 | Formatting FSM
 |===
 
-*Decision: CBC-MAC.* The entropy collector is fixed at 256 bits, an exact multiple of 128 bits,
-which is precisely the case where CBC-MAC's only restriction does not apply. CMAC's subkey
+*Decision: CBC-MAC.* Each conditioning call is fed a fixed 256 bits, an exact multiple of 128
+bits, which is precisely the case where CBC-MAC's only restriction does not apply. CMAC's subkey
 logic addresses unpredictable or attacker-chosen input length, a case that does not occur for a
 hardware entropy collector whose output width is a design constant. The restriction quoted
 above — no personalization string during instantiation, no additional input during reseeding —
@@ -238,13 +279,20 @@ Output = V
 Only the final chaining value is emitted; intermediate `V` values are never observed outside
 the datapath.
 
-With a 256-bit collector, every conditioning call processes exactly two 128-bit blocks:
+With two collector fills per call, every conditioning call processes exactly two 128-bit blocks:
 
 ----
 V0 = 0x00000000000000000000000000000000
 V1 = AES_encrypt(Key, V0 ⊕ M1) = AES_encrypt(Key, M1)
 V2 = AES_encrypt(Key, V1 ⊕ M2)
 Output = V2   (the 128-bit conditioned block)
+----
+
+The conditioner runs this three times to fill the 384-bit CTR_DRBG seed, restarting from
+`V = 0` each time, and concatenates the three results:
+
+----
+entropy_input = {block_2, block_1, block_0}   // 384 bits, block_0 in the low-order bits
 ----
 
 === Conditioning Key
@@ -480,10 +528,11 @@ No AES operation is performed. The DRBG is unusable until `Instantiate()` execut
 | —
 |===
 
-A full instantiation or reseed sequence, including entropy conditioning, totals 5 AES
-encryptions: 2 for CBC-MAC and 3 for `CTR_DRBG_Update`. Steady-state `Generate()` calls, once
-instantiated, involve only the CTR_DRBG stage and cost 4 AES encryptions with no entropy
-collection or conditioning overhead.
+A full instantiation or reseed sequence, including entropy conditioning, totals 9 AES
+encryptions: 6 for CBC-MAC (3 conditioning calls x 2 chained encryptions, producing the
+384-bit seed) and 3 for `CTR_DRBG_Update`. Steady-state `Generate()` calls, once instantiated,
+involve only the CTR_DRBG stage and cost 4 AES encryptions with no entropy collection or
+conditioning overhead.
 
 == Cipher Datapath Reuse
 
@@ -545,9 +594,17 @@ CTR_DRBG operations are never required simultaneously for a single IV generation
 | No side-channel protection on DRBG state updates
 | ~60–70% cycle reduction and ~80% area reduction versus the masked Sbox, on the IV-generation critical path
 
-| 256-bit entropy collector (vs. 192-bit theoretical floor)
+| 256 raw bits per conditioning call (vs. 192-bit theoretical floor)
 | Slightly higher fill latency than the theoretical minimum
-| Margin against measurement uncertainty in actual noise-source min-entropy; clean power-of-two RTL width
+| Margin against measurement uncertainty in actual noise-source min-entropy; an exact multiple of the AES block size, satisfying CBC-MAC's input-length restriction
+
+| 128-bit collector reused across blocks (vs. one register per conditioning input)
+| Requires a valid/ready handshake and a per-block refill, 6 fills per seed
+| One AES-block-wide register feeds the cipher directly with no wider staging buffer; a single collector instance serves every block of every call
+
+| Three conditioning calls per seed (vs. one)
+| 768 raw bits and 6 AES encryptions per instantiate/reseed, and a 0.75 min-entropy-per-bit requirement on the noise source
+| Supplies the full 384-bit `seedlen` the No-DF CTR_DRBG requires; each block stays an independent SP 800-90C §3.2.2.2 conditioning call with its own 192-bit entropy argument
 
 | No derivation function (No-DF CTR_DRBG)
 | Requires the entropy conditioner to deliver full-entropy seed material, not just raw bits
@@ -578,7 +635,10 @@ CTR_DRBG operations are never required simultaneously for a single IV generation
 
 * CBC-MAC selected as the conditioning function (SP 800-90C §3.2.1.3, item 2).
 * AES-256 used for both CBC-MAC and CTR_DRBG.
-* 256-bit entropy collector width; two CBC-MAC iterations per conditioning call.
+* 128-bit entropy collector (SIPO), drained twice per conditioning call — two CBC-MAC
+  iterations over 256 raw bits — and six times per 384-bit seed.
+* Three independent conditioning calls per seed, `V` re-zeroed each time, concatenated to form
+  the 384-bit `seedlen` the No-DF CTR_DRBG requires.
 * Conditioning key is a fixed, public, hardcoded 256-bit constant, supplied by top-level
   integration.
 * CTR_DRBG configured as No-DF, `ctr_len = 128`, no nonce, no personalization string, no
@@ -598,7 +658,10 @@ CTR_DRBG operations are never required simultaneously for a single IV generation
 == Verification Items
 
 * Formal min-entropy characterization of the noise source (SP 800-90B estimation), to confirm
-  the 256-bit collector's margin above the 192-bit floor holds on the physical implementation.
+  it delivers at least 0.75 bits of min-entropy per raw sampled bit — the requirement implied by
+  576 bits of min-entropy drawn from 768 raw bits per 384-bit seed (see
+  <<entropy-collector-width>>). This is the assumption the full-entropy claim rests on, and the
+  only one not verifiable in RTL simulation.
 * RTL implementation and verification of the unmasked Sbox variant, and confirmation that it is
   not shared with the masked bulk-cipher Sbox at any point in the datapath.
 * Timing closure of the CBC-MAC and CTR_DRBG datapath at the target 150 MHz noise-source

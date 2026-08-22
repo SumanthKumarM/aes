@@ -50,9 +50,9 @@ module cbc_mac(
             if(!enb_n) begin
                 case(fsm_state)
                     CONSUME: begin  // this state just consumes 128-bit words from entropy collector 
-                        // unmasked CIPHER will be invoked 2 times to produce 128-bit conditioned random word. Since 3 such conditioned random
-                        // words are needed to regV is required to reset to 0 for every such conditioned random word generation
-                        // so regV is reset to 0 when enc_cntr becomes even which is exactly when 128-bit conditioned random word is generated
+                        // unmasked CIPHER will be invoked 2 times to produce 128-bit conditioned random word. Since 3 such conditioned
+                        // random words are needed, regV is required to reset to 0 for every such conditioned random word generation so
+                        // regV is reset to 0 when enc_cntr becomes even which is exactly when 128-bit conditioned random word is generated
                         regV <= (enc_cntr[0] == 0) ? 0 : regV;
 
                         cbcmac_valid <= 0;
@@ -64,18 +64,19 @@ module cbc_mac(
                     OPERATE: begin  // this state performs CBC-MAC operation on the 128-bit word received from entropy collector
                         cbcmac_valid <= 0;
                         ready <= 0;  // deasserting ready as CBC-MAC conditioner is now processing the 128-bit word received from entropy collector
-                        cipher_enb_n <= 0;  // enable unmasked CIPHER to start processing the state matrix
+
+                        // disabling CIPHER as soon as it's done computing encrypted data so that it doesn't stay
+                        // enabled to perform unnecessary operations while registers are still updating
+                        cipher_enb_n <= cipher_done;
+
                         regV <= (cipher_done) ? cipher_state : regV;
-                        enc_cntr <= (enc_cntr == 6) ? 0 : ((cipher_done) ? enc_cntr + 1 : enc_cntr);  // incrementing the counter when unmasked CIPHER has finished processing the state matrix
+                        enc_cntr <= (cipher_done) ? ((enc_cntr == 5) ? 0 : enc_cntr + 1) : enc_cntr;  // incrementing the counter when unmasked CIPHER has finished processing the state matrix
 
                         if(health_error) fsm_state <= ERROR;  // if health tests fail, CBC-MAC conditioner goes to ERROR state
-                        else begin
-                            if(enc_cntr == 6) fsm_state <= RELEASE;
-                            else fsm_state <= (cipher_done) ? CONSUME : OPERATE;
-                        end
+                        else fsm_state <= (enc_cntr == 5 && cipher_done) ? RELEASE : ((cipher_done) ? CONSUME : OPERATE);
                     end
                     RELEASE: begin
-                        cbcmac_valid <= 1;
+                        cbcmac_valid <= (cbcmac_valid && ctr_drbg_ready) ? 0 : 1;  // deasserting valid signal once CTR-DRBG asserts so that valid doesn't stay high unnecessarily
                         ready <= 0;
                         cipher_enb_n <= 1;
 

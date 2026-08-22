@@ -6,6 +6,7 @@ rtl/invSbox_top.sv
 rtl/invAddRoundKey_top.sv
 rtl/invCipher_top.sv
 tb/__pycache__
+sim/__pycache__
 sim/obj_dir
 sim/sim_build
 sim/.cache  /
@@ -13,6 +14,7 @@ sim/dump.vcd
 sim/results.xml
 sim/*.log
 sim/*.jou
+synth/__pycache__
 synth/reports/
 synth/sta_reports/
 synth/synth_reports/

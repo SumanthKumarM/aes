@@ -51,6 +51,15 @@ It is validated in two independent layers at import time:
      answer is exactly the published FIPS 197 C.3 ciphertext; two more use the
      real conditioning key, which also anchors the master_key unpacking.
 
+Entropy stimulus. Normal-operation tests drive `entropy` from the project's
+physics-grounded RO noise model (aes/sim/noise_source_model.py): 32 parallel
+13-stage ring oscillators at 150 MHz with thermal, flicker and supply jitter
+accumulated as a random walk, XOR-combined, and sampled through a DFF
+metastability model. This exercises the health tests against a source with
+realistic bias and autocorrelation rather than an idealised PRNG. The RCT/APT
+negative tests keep their deterministic fault vectors, which are chosen to trip
+one specific health test and are not samples of a noise source at all.
+
 Design intent encoded here (RTL is never edited from this file; if the RTL
 deviates the test fails and the message documents the deviation):
   - Exactly 6 entropy words are consumed per 384-bit seed.
@@ -77,9 +86,30 @@ from cipher_tb import (
     rtl_state_to_nist_bytes,
 )
 
+# Physics-grounded RO noise source (aes/sim/noise_source_model.py, on PYTHONPATH
+# via the sim dir). Normal-operation tests drive the DUT from this rather than a
+# bare PRNG so the entropy carries the real jitter/metastability statistics.
+try:
+    from noise_source_model import TRNGNoiseSource
+    _HAVE_PHYSICS_MODEL = True
+except ImportError:
+    _HAVE_PHYSICS_MODEL = False
+    cocotb.log.warning(
+        "noise_source_model.py not found — normal tests fall back to numpy random"
+    )
+
 # Simulation constants
 CLK_PERIOD_NS = 10
 RESET_CYCLES  = 8
+
+# Physics-model bits cost ~0.3 ms each to generate, so the buffer is sized to
+# the longest test (multi_seed/statistics, ~2400 clk) rather than arbitrarily
+# large. Nothing wraps at this size, so no test ever re-sees the same entropy.
+NOISE_BUF_SIZE = 5000
+
+# Healthy-source mode for every normal-operation test; degrades to numpy random
+# only if noise_source_model.py is missing.
+_NOISE_MODE = "physics" if _HAVE_PHYSICS_MODEL else "random"
 
 ENTROPY_WORD_BITS = 128          # entropy_clctr #(128) SIPO width
 BLOCKS_PER_CALL   = 2            # CBC-MAC iterations per conditioned block
@@ -249,14 +279,21 @@ class NoiseBitBuffer:
 
     Modes
     -----
-    'random'      — uniform random bits (healthy source).
+    'physics'     — RO physics model (TRNGNoiseSource, 32 ROs x 13 INV,
+                    150 MHz): thermal + flicker + supply jitter accumulation
+                    and DFF metastability. Used for all normal-operation tests.
+    'random'      — uniform random bits. Automatic fallback if the model is
+                    unavailable.
     'stuck_0'     — constant 0. Trips RCT.
     'stuck_1'     — constant 1. Trips RCT.
     'apt_trigger' — 3 ones + 1 zero repeating: 75% ones (well above the APT
                     threshold) but a maximum run of 3, so RCT never fires first.
+
+    The three fault modes stay deterministic on purpose: they are fault-injection
+    vectors chosen to trip a specific health test, not samples of a noise source.
     """
 
-    def __init__(self, mode="random", n_bits=200_000, seed=None):
+    def __init__(self, mode="physics", n_bits=NOISE_BUF_SIZE, seed=None):
         self._mode = mode
         self._seed = seed if seed is not None else random.randint(0, 0xFFFF_FFFF)
         self._idx = 0
@@ -271,6 +308,19 @@ class NoiseBitBuffer:
         if self._mode == "apt_trigger":
             pattern = ([1] * 3 + [0]) * (n // 4 + 1)
             return np.array(pattern[:n], dtype=np.uint8)
+        if self._mode == "physics":
+            if not _HAVE_PHYSICS_MODEL:
+                cocotb.log.warning("Physics model not available — using numpy random")
+                return rng.integers(0, 2, size=n, dtype=np.uint8)
+            cocotb.log.info(
+                f"[NoiseBitBuffer] Generating {n:,} physics bits "
+                f"(32 RO x 13 INV @ 150 MHz, seed=0x{self._seed:X})..."
+            )
+            bits = TRNGNoiseSource(
+                n_ro=32, n_inv=13, fs_MHz=150.0, seed=self._seed
+            ).generate_bits(n)
+            cocotb.log.info(f"[NoiseBitBuffer] Done (mean={bits.mean():.4f}).")
+            return bits
         return rng.integers(0, 2, size=n, dtype=np.uint8)
 
     def next_bit(self) -> int:
@@ -498,7 +548,7 @@ async def sipo_collector_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0xABCD)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0xABCD)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
     mon = WordMonitor(dut).start()
@@ -543,7 +593,7 @@ async def cbcmac_seed_test(dut):
     dut._log.info(f"  conditioning key = {CONDITIONER_KEY.hex()}")
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x1234)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x1234)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
     cocotb.start_soon(signal_monitor(dut, label="TC3"))
@@ -574,7 +624,7 @@ async def multi_seed_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x5A5A)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x5A5A)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
     mon = WordMonitor(dut).start()
@@ -610,7 +660,7 @@ async def backpressure_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x7777)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x7777)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
     mon = WordMonitor(dut).start()
@@ -674,7 +724,7 @@ async def always_ready_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x2468)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x2468)
     await reset_dut(dut)
     dut.ctr_drbg_ready.value = 1          # ready long before valid
     cocotb.start_soon(noise_driver(dut, buf))
@@ -803,7 +853,7 @@ async def error_latch_recovery_test(dut):
     assert int(dut.health_error.value) == 0, "health_error must clear after reset"
     dut._log.info("✓ Recovered to CONSUME, health_error cleared")
 
-    good = NoiseBitBuffer(mode="random", seed=0xBEEF)
+    good = NoiseBitBuffer(mode=_NOISE_MODE, seed=0xBEEF)
     cocotb.start_soon(noise_driver(dut, good))
     mon = WordMonitor(dut).start()
     seed = await collect_seed(dut)
@@ -826,7 +876,7 @@ async def enb_gating_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x0F0F)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x0F0F)
     await reset_dut(dut)
     nd = cocotb.start_soon(noise_driver(dut, buf))
     mon = WordMonitor(dut).start()
@@ -879,7 +929,7 @@ async def enc_cntr_sequence_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0x3141)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x3141)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
 
@@ -938,7 +988,7 @@ async def statistics_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0xC0FFEE)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0xC0FFEE)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
 
@@ -970,7 +1020,7 @@ async def reset_mid_operation_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    buf = NoiseBitBuffer(mode="random", seed=0xDEAD)
+    buf = NoiseBitBuffer(mode=_NOISE_MODE, seed=0xDEAD)
     await reset_dut(dut)
     cocotb.start_soon(noise_driver(dut, buf))
 
@@ -1009,7 +1059,7 @@ async def health_error_mid_operation_test(dut):
     dut._log.info("=" * 64)
 
     start_clock(dut)
-    good = NoiseBitBuffer(mode="random", seed=0x9999)
+    good = NoiseBitBuffer(mode=_NOISE_MODE, seed=0x9999)
     await reset_dut(dut)
     nd = cocotb.start_soon(noise_driver(dut, good))
 

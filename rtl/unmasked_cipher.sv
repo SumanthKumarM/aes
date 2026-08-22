@@ -309,7 +309,10 @@ module unmasked_cipher(
                 if(round_cntr == 0) begin  // only AddRoundKey is performed in first cipher round
                     // AddRoundKey is disabled when it has computed the output to protect it from using stale 
                     // previous cycle output when it enters 'if(round_cntr == 0) or PRE_ADDROUNDKEY'
-                    ark_enb_n <= ark_done;
+                    // AddRoundKey's enable also depends on cipher_done because new data will be assigned to CIPHER
+                    // which is forwarded to AddRoundKey only after CIPHER is done computing encrypted data
+                    // this logic helps to avoid AddRoundKey operate on stale data and raise false ark_done
+                    ark_enb_n <= ark_done | cipher_done;
 
                     ark_state <= state;  // loading input of addRoundKey
                     temp_state <= (ark_done) ? addRoundKeyOut : temp_state;

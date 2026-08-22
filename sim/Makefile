@@ -114,8 +114,6 @@ else ifeq ($(block),cipher)
 else ifeq ($(block),unmasked_cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cbc_mac)
-	# CBC-MAC conditioner: unmasked AES-256 datapath + entropy collector/health
-	# tests from drbg_utilities.sv (added above alongside trng_param_pkg.sv)
 	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invSbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/$(block).sv
@@ -157,7 +155,7 @@ ifneq ($(test),)
 endif
 
 # simulates all tests
-all: run_all
+all: run_test_suite
 
 .PHONY: gen_param
 gen_param: $(TRNG_PARAM_FILE)
@@ -173,7 +171,7 @@ ifneq ($(filter $(block),$(GENERATED_TOP_BLOCKS)),)
 endif
 
 # Standalone RTL elaboration check (Verilator only, no cocotb linkage). This is
-# independent of run_test/run_all: cocotb's own `sim` target (pulled in below)
+# independent of run_test/run_test_suite: cocotb's own `sim` target (pulled in below)
 # already compiles incrementally via Make's normal file-mtime tracking, so
 # nothing here needs to duplicate that compile.
 # gen_top is a prerequisite so that _top wrapper blocks are (re)generated
@@ -184,8 +182,8 @@ compile_rtl: gen_top $(BLOCK_DEPS)
 	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
 	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
 
-.PHONY: run_all
-run_all: gen_top $(BLOCK_DEPS)
+.PHONY: run_test_suite
+run_test_suite: gen_top $(BLOCK_DEPS)
 	@echo "Running all tests..."
 	$(MAKE) sim 2>&1 | tee sim.log
 
@@ -275,8 +273,20 @@ sta:
 	$(OPENSTA) -no_init -exit $(SYNTH_DIR)/block_lvl_sta.tcl \
 	2>&1 | tee $(STA_REPORT_DIR)/$(block)_sta.log
 
-.PHONY: clean_all
-clean_all: clean
+# Full-tree cleanup, hooked onto cocotb's own `clean`.
+#
+# cocotb's Makefile.inc declares clean as a DOUBLE-COLON rule (`clean::`), which
+# is its documented extension point: every `clean::` rule in the build runs, in
+# the order the files were read. So the rule below appends to cocotb's cleanup
+# rather than replacing it -- `make clean` first runs cocotb's own (removes
+# $(SIM_BUILD), $(COCOTB_RESULTS_FILE), and the Verilator dump.vcd/dump.fst),
+# then everything here.
+#
+# Keep the double colon. GNU Make refuses to mix `:` and `::` rules for one
+# target ("target file 'clean' has both : and :: entries"), so a single-colon
+# `clean:` here would be a hard error whenever cocotb-config is on PATH.
+.PHONY: clean
+clean::
 	rm -f ./*.vcd ./*.fst ./*.log ./*.xml
 	rm -rf sim_build ./.cache* obj_dir
 	rm -rf $(TB_DIR)/__pycache__
