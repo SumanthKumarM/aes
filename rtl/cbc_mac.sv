@@ -7,7 +7,7 @@
 import type_defs_pkg::*;
 
 module cbc_mac(
-    output logic [383:0] random_word,  // 384-bit conditioned random word output from CBC-MAC conditioner
+    output u384_t random_word,  // 384-bit conditioned random word output from CBC-MAC conditioner
     output logic cbcmac_valid,  // becomes high when CBC-MAC conditioner has finished producing conditioned random word
     output logic health_error,  // becomes high when health tests fail
     input logic ctr_drbg_ready,  // ready signal from CTR_DRBG module to indicate that it is ready to receive conditioned random word
@@ -20,7 +20,7 @@ module cbc_mac(
     logic gated_clk;  // gated clock to reduce dynamic power consumption
     logic [2:0] enc_cntr;  // counter to keep track of number of times unmasked CIPHER has been invoked
     u128_t regV;  // stores intermediate outputs of unmasked CIPHER
-    logic [383:0] acc;  // accumulates the 128-bit outputs of unmasked CIPHER to produce 384-bit conditioned random word
+    u384_t acc;  // accumulates the 128-bit outputs of unmasked CIPHER to produce 384-bit conditioned random word
     u128_t entropy_word;  // 128-bit word collected from noise source
     logic valid, ready;  // valid-ready handshake signals for entropy word transfer from entropy collector to CBC-MAC conditioner
     logic cipher_enb_n;  // active low enable signal for unmasked CIPHER
@@ -35,7 +35,7 @@ module cbc_mac(
     entropy_clctr#(128) ENTROPY_COLLECTOR(entropy_word, valid, entropy, ready, gated_clk, rst_n);
     unmasked_cipher CIPHER(cipher_state, cipher_done, cipher_state_in, MASTER_KEY, cipher_enb_n, rst_n, gated_clk);
 
-    always_ff @(posedge clk) begin
+    always_ff @(posedge gated_clk) begin
         if(!rst_n) begin
             cbcmac_valid <= 0;
             enc_cntr <= 0;

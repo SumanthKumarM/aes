@@ -114,9 +114,11 @@ module addRoundKey_AES256(
         32'h3600_0000   // Index 10 (Round 10)
     };
 
+    logic gated_clk;  // gated clock to reduce dynamic power consumption
     expKey_matrix_t expKey;  // expanded KEYs by KeyExpansion logic
     expKey_matrix_t prev_expKey;  // these are previous round KEYs which are used in current round
-    logic gated_clk;  // gated clock to reduce dynamic power consumption
+    u128_t rotword_subBytes;  // stores SBox transformation of rotated words
+    u128_t subBytes;  // stores sub-bytes of expanded KEY
 
     // ICG cell to reduce dynamic power consumption
     icg ICG(gated_clk, (~enb_n | ~rst_n), clk); 
@@ -130,6 +132,9 @@ module addRoundKey_AES256(
         rot_word[7:0] = word[31:24];
         return rot_word;
     endfunction
+
+    assign rotword_subBytes = unmaskedSbox({96'd0, rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]})}, 1'b0);
+    assign subBytes = unmaskedSbox({96'd0, {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]}}, 1'b0);
 
     // core logic of KeyExpansion()
     always_comb begin
@@ -146,8 +151,7 @@ module addRoundKey_AES256(
                 if(round_num[0] == 0) begin  // even rounds require first 4 KEY words
                     for(int i=0; i<4; i++) begin
                         if(i == 0)  // since this index is multiple of 8 it satisfies i%8 = 0. So special transformation is applied
-                            {expKey[3][0], expKey[2][0], expKey[1][0], expKey[0][0]} = {prev_expKey[3][0], prev_expKey[2][0], prev_expKey[1][0], prev_expKey[0][0]} ^ 
-                                                                                       unmaskedSbox({96'd0, rotWord({prev_expKey[3][7], prev_expKey[2][7], prev_expKey[1][7], prev_expKey[0][7]})}, 1'b0)[31:0] ^ RCON[{1'b0, round_num[3:1]}];
+                            {expKey[3][0], expKey[2][0], expKey[1][0], expKey[0][0]} = {prev_expKey[3][0], prev_expKey[2][0], prev_expKey[1][0], prev_expKey[0][0]} ^ rotword_subBytes[31:0] ^ RCON[{1'b0, round_num[3:1]}];
                         else  // remaining all indices in this loop range don't satisfy i%8 = 0 and i%8 = 4. So normal transformation is applied
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
                     end
@@ -161,8 +165,7 @@ module addRoundKey_AES256(
 
                     for(int i=4; i<8; i++) begin
                         if(i == 4)  // since this index satisfies i%8 = 4, special transformation is applied
-                            {expKey[3][4], expKey[2][4], expKey[1][4], expKey[0][4]} = {prev_expKey[3][4], prev_expKey[2][4], prev_expKey[1][4], prev_expKey[0][4]} ^
-                                                                                       unmaskedSbox({96'd0, {prev_expKey[3][3], prev_expKey[2][3], prev_expKey[1][3], prev_expKey[0][3]}}, 1'b0)[31:0];
+                            {expKey[3][4], expKey[2][4], expKey[1][4], expKey[0][4]} = {prev_expKey[3][4], prev_expKey[2][4], prev_expKey[1][4], prev_expKey[0][4]} ^ subBytes[31:0];
                         else  // remaining all indices in this loop range don't satisfy i%8 = 0 and i%8 = 4. So normal transformation is applied
                             {expKey[3][i], expKey[2][i], expKey[1][i], expKey[0][i]} = {prev_expKey[3][i], prev_expKey[2][i], prev_expKey[1][i], prev_expKey[0][i]} ^ {expKey[3][i-1], expKey[2][i-1], expKey[1][i-1], expKey[0][i-1]};
                     end
@@ -255,6 +258,7 @@ module unmasked_cipher(
     state_matrix_t addRoundKeyOut;  // output of AddRoundKey module
     logic ark_done;  // indicates that addRoundKey has computed the output
     u128_t sbox_state;  // input state matrix to SBox
+    u128_t subBytes;  // output of SBox
     state_matrix_t subBytes_matrix;  // matrix version of subBytes
     state_matrix_t shift_rows;  // stores state that has gone through shiftRows
     state_matrix_t mix_columns;  // stores state that has gone through mixColumns
@@ -269,9 +273,11 @@ module unmasked_cipher(
     always_comb begin  // rerouting subBytes to subBytes_matrix as both of them are in different formats
         for(int i=0; i<16; i++)  // loading Sbox input with previous addRoundKey's output
             sbox_state[((8*(i%4))+(32*(i/4))) +: 8] = temp_state[i%4][i/4];
-                                
+
+        subBytes = unmaskedSbox(sbox_state, 1'b1);  // wiring the output of SBox to subBytes
+
         for(int i=0; i<16; i++)  // computing subBytes for given state matrix
-            subBytes_matrix[i%4][i/4] = unmaskedSbox(sbox_state, 1'b1)[((8*(i%4))+(32*(i/4))) +: 8];
+            subBytes_matrix[i%4][i/4] = subBytes[((8*(i%4))+(32*(i/4))) +: 8];
     end
 
     /**
