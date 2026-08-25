@@ -96,7 +96,7 @@ VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 # APT_BIT_WINDOW / APT_THRESHOLD, so the blocks needing drbg_utilities.sv are
 # exactly the blocks needing trng_param_pkg.sv -- both are added together, with
 # the parameter package first so its imports resolve.
-ifneq ($(filter $(block),trng cbc_mac sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
+ifneq ($(filter $(block),trng cbc_mac iv_gen sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
     VERILOG_SOURCES += $(TRNG_PARAM_FILE) $(DRBG_UTILS)
 endif
@@ -115,6 +115,14 @@ else ifeq ($(block),unmasked_cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cbc_mac)
 	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),ctr_drbg)
+	# ctr_drbg embeds one unmasked_cipher; no health tests or entropy collector,
+	# so drbg_utilities.sv/trng_param_pkg.sv are deliberately not pulled in.
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),iv_gen)
+	# Full entropy pipeline: cbc_mac (conditioner + health tests + collector)
+	# and ctr_drbg, each with its own unmasked_cipher instance.
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/cbc_mac.sv $(RTL_DIR)/ctr_drbg.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invSbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher_top)

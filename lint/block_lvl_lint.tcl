@@ -43,6 +43,23 @@ proc get_block_dependencies { block } {
             lappend deps "trng_param_pkg.sv" "drbg_utilities.sv" \
                          "unmasked_cipher.sv" "shiftRows.sv" "mixColumns.sv" "icg.sv"
         }
+        "ctr_drbg" {
+            # ctr_drbg instantiates only icg and unmasked_cipher -- no health
+            # tests and no entropy collector -- so drbg_utilities.sv and
+            # trng_param_pkg.sv are deliberately absent. addRoundKey_AES256
+            # lives inside unmasked_cipher.sv, so it needs no file of its own.
+            lappend deps "unmasked_cipher.sv" "shiftRows.sv" "mixColumns.sv" "icg.sv"
+        }
+        "iv_gen" {
+            # Full entropy pipeline: cbc_mac (conditioner + health tests +
+            # collector) and ctr_drbg, each with its own unmasked_cipher
+            # instance. Needs the union of both blocks' dependencies plus the
+            # two blocks themselves. trng_param_pkg.sv stays first for the same
+            # reason as in cbc_mac -- drbg_utilities.sv reads from it.
+            lappend deps "trng_param_pkg.sv" "drbg_utilities.sv" \
+                         "unmasked_cipher.sv" "shiftRows.sv" "mixColumns.sv" \
+                         "cbc_mac.sv" "ctr_drbg.sv" "icg.sv"
+        }
         default {
             # No external dependencies for this block
         }

@@ -3,9 +3,10 @@ Cocotb testbench for the CBC-MAC entropy conditioner (cbc_mac.sv).
 
 DUT interface (current cbc_mac.sv):
   - random_word[383:0] : 384-bit conditioned seed for CTR_DRBG (seedlen =
-                         blocklen + keylen = 128 + 256). Driven only while
-                         cbcmac_valid && ctr_drbg_ready, so it is sampled on
-                         the handshake cycle.
+                         blocklen + keylen = 128 + 256). It is the conditioner's
+                         accumulator register, driven straight from a flop with
+                         no ctr_drbg_ready term, so it holds the seed for the
+                         whole RELEASE window and is stable across the handshake.
   - cbcmac_valid       : level, held in RELEASE until ctr_drbg_ready
   - health_error       : SP 800-90B RCT/APT failure (level, from health_tests)
   - ctr_drbg_ready     : consumer ack (input)
@@ -13,10 +14,14 @@ DUT interface (current cbc_mac.sv):
   - enb_n              : active-low module enable
 
 Internal hierarchy probed (Verilator public flattening):
-  dut.fsm_state / dut.enc_cntr / dut.regV / dut.acc  : conditioner FSM + datapath
+  dut.fsm_state / dut.enc_cntr / dut.regV            : conditioner FSM + datapath
   dut.valid / dut.ready / dut.entropy_word           : collector handshake (SIPO)
   dut.cipher_done / dut.cipher_state                 : unmasked AES-256 core
   dut.HEALTH_TESTS.rct_error / .apt_error / .error   : health tests
+
+The 384-bit accumulator is not a separate internal register: cbc_mac accumulates
+directly into the random_word output register, so slice-level checks read
+random_word rather than an internal signal.
 
 Algorithm under test — SP 800-90B Appendix F, as required by SP 800-90C
 Sec. 3.2.1.3 for an external conditioning function:
@@ -449,9 +454,9 @@ async def collect_seed(dut, timeout=SEED_TIMEOUT):
     """Wait for cbcmac_valid, complete the ctr_drbg_ready handshake, return the
     384-bit seed.
 
-    random_word is combinational on (cbcmac_valid && ctr_drbg_ready), so ready
-    is raised mid-cycle and the data read after a settling delta, still ahead
-    of the rising edge that completes the transfer.
+    random_word is a registered output with no ctr_drbg_ready term, so it is
+    already stable when cbcmac_valid is seen; ready is raised mid-cycle and the
+    value read ahead of the rising edge that completes the transfer.
     """
     await wait_signal(dut.cbcmac_valid, 1, timeout, dut.clk)
     dut.ctr_drbg_ready.value = 1
@@ -527,7 +532,6 @@ async def reset_test(dut):
     )
     assert int(dut.enc_cntr.value) == 0, "enc_cntr must reset to 0"
     assert int(dut.regV.value) == 0, "regV must reset to 0"
-    assert int(dut.acc.value) == 0, "acc must reset to 0"
     assert int(dut.cipher_enb_n.value) == 1, "CIPHER must be disabled after reset"
     dut._log.info("✓ FSM in CONSUME, datapath cleared, CIPHER disabled")
 
@@ -668,15 +672,15 @@ async def backpressure_test(dut):
     await wait_signal(dut.cbcmac_valid, 1, SEED_TIMEOUT, dut.clk)
     dut._log.info("✓ cbcmac_valid asserted")
 
-    acc_at_valid = int(dut.acc.value)
+    seed_at_valid = int(dut.random_word.value)
     for cyc in range(HOLD):
         await FallingEdge(dut.clk)
         assert int(dut.cbcmac_valid.value) == 1, (
             f"cbcmac_valid dropped at cycle {cyc} without ctr_drbg_ready — "
             f"the consumer would lose the seed"
         )
-        assert int(dut.acc.value) == acc_at_valid, (
-            f"accumulator changed at cycle {cyc} while waiting for ready — "
+        assert int(dut.random_word.value) == seed_at_valid, (
+            f"random_word changed at cycle {cyc} while waiting for ready — "
             f"held data must be stable across backpressure"
         )
         assert int(dut.fsm_state.value) == ST_RELEASE, (
@@ -700,9 +704,9 @@ async def backpressure_test(dut):
     dut.ctr_drbg_ready.value = 0
     mon.stop()
 
-    assert seed == acc_at_valid, (
+    assert seed == seed_at_valid, (
         f"seed delivered on the handshake (0x{seed:096x}) differs from the value "
-        f"held during backpressure (0x{acc_at_valid:096x})"
+        f"held during backpressure (0x{seed_at_valid:096x})"
     )
     dut._log.info("✓ Delivered seed equals the held value")
 
@@ -891,7 +895,7 @@ async def enb_gating_test(dut):
         "fsm_state": int(dut.fsm_state.value),
         "enc_cntr": int(dut.enc_cntr.value),
         "regV": int(dut.regV.value),
-        "acc": int(dut.acc.value),
+        "random_word": int(dut.random_word.value),
     }
     dut._log.info(f"  frozen at fsm={_ST_NAMES[frozen['fsm_state']]} "
                   f"enc_cntr={frozen['enc_cntr']}")
@@ -945,7 +949,7 @@ async def enc_cntr_sequence_test(dut):
             done_count += 1
             seq.append(int(dut.enc_cntr.value))
 
-        cur_slices = seed_blocks(int(dut.acc.value))
+        cur_slices = seed_blocks(int(dut.random_word.value))
         for i in range(COND_BLOCKS):
             if cur_slices[i] != prev_slices[i]:
                 slice_writes[i] += 1
@@ -969,7 +973,7 @@ async def enc_cntr_sequence_test(dut):
 
     for i, n in enumerate(slice_writes):
         assert n == 1, (
-            f"acc slice {i} (random_word[{128*(i+1)-1}:{128*i}]) was written {n} "
+            f"random_word[{128*(i+1)-1}:{128*i}] (slice {i}) was written {n} "
             f"times during one seed, expected exactly 1 — a slice written more "
             f"than once is being overwritten after its CBC-MAC call completed"
         )
@@ -1036,8 +1040,8 @@ async def reset_mid_operation_test(dut):
     assert int(dut.enc_cntr.value) == 0, "enc_cntr must clear"
     assert int(dut.regV.value) == 0, "regV must clear — a stale V would chain into "\
                                      "the first block of the next seed"
-    assert int(dut.acc.value) == 0, "acc must clear — stale blocks would leak into "\
-                                    "the next seed"
+    assert int(dut.random_word.value) == 0, "random_word must clear — stale "\
+                                            "blocks would leak into the next seed"
     dut._log.info("✓ All state cleared by reset")
 
     mon = WordMonitor(dut).start()

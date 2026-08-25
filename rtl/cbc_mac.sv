@@ -20,7 +20,6 @@ module cbc_mac(
     logic gated_clk;  // gated clock to reduce dynamic power consumption
     logic [2:0] enc_cntr;  // counter to keep track of number of times unmasked CIPHER has been invoked
     u128_t regV;  // stores intermediate outputs of unmasked CIPHER
-    u384_t acc;  // accumulates the 128-bit outputs of unmasked CIPHER to produce 384-bit conditioned random word
     u128_t entropy_word;  // 128-bit word collected from noise source
     logic valid, ready;  // valid-ready handshake signals for entropy word transfer from entropy collector to CBC-MAC conditioner
     logic cipher_enb_n;  // active low enable signal for unmasked CIPHER
@@ -40,7 +39,7 @@ module cbc_mac(
             cbcmac_valid <= 0;
             enc_cntr <= 0;
             regV <= 0;
-            acc <= 0;
+            random_word <= 0;
             cipher_state_in <= 0;
             cipher_enb_n <= 1;
             ready <= 0;
@@ -95,10 +94,10 @@ module cbc_mac(
                     end
                 endcase
 
-                // accumulating regV into 'acc' register to produce 384-bit conditioned random word
-                acc[127:0] <= (enc_cntr == 1 && cipher_done) ? cipher_state : acc[127:0];
-                acc[255:128] <= (enc_cntr == 3 && cipher_done) ? cipher_state : acc[255:128];
-                acc[383:256] <= (enc_cntr == 5 && cipher_done) ? cipher_state : acc[383:256];
+                // accumulating regV into 'random_word' register to produce 384-bit conditioned random word
+                random_word[127:0] <= (enc_cntr == 1 && cipher_done) ? cipher_state : random_word[127:0];
+                random_word[255:128] <= (enc_cntr == 3 && cipher_done) ? cipher_state : random_word[255:128];
+                random_word[383:256] <= (enc_cntr == 5 && cipher_done) ? cipher_state : random_word[383:256];
             end
             else begin
                 cbcmac_valid <= 0;
@@ -106,13 +105,10 @@ module cbc_mac(
                 cipher_enb_n <= 1;
                 cipher_state_in <= cipher_state_in;
                 regV <= regV;
-                acc <= acc;
+                random_word <= random_word;
                 enc_cntr <= enc_cntr;
                 fsm_state <= fsm_state;
             end
         end
     end
-
-    // random_word will be given out only when CBC-MAC is done producing conditioned random bits and CTR-DRBG is ready to accept it 
-    assign random_word = (cbcmac_valid && ctr_drbg_ready) ? acc : 0;
 endmodule
