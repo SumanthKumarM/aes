@@ -265,7 +265,7 @@ module unmasked_cipher(
     cipher_internal_states fsm_state;
 
     // sub-module instances
-    icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
+    icg ICG(gated_clk, (~enb_n | ~rst_n | cipher_done), clk);  // ICG cell to reduce dynamic power consumption
     shiftRows ShiftRows(shift_rows, subBytes_matrix);
     mixColumns MixColumns(mix_columns, shift_rows);
     addRoundKey_AES256 AddRoundKey(addRoundKeyOut, ark_done, ark_state, master_key, round_cntr, ark_enb_n, rst_n, gated_clk);
