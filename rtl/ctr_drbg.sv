@@ -42,6 +42,10 @@ module ctr_drbg(
     ctr_drbg_states fsm_state;
     gen_internal_states gen_fsm;
 
+    // when CTR-DRBG goes to RESET_CBCMAC state it resets all registers so CIPHER is
+    // also required to begin from start but not just resume its operation
+    assign cipher_rst_n = (fsm_state == RESET_CBCMAC) ? 0 : 1;
+
     // sub-modules
     icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
     unmasked_cipher CIPHER(cipher_state, cipher_done, cipher_state_in, master_key, cipher_enb_n, (rst_n & cipher_rst_n), gated_clk);
@@ -159,7 +163,6 @@ module ctr_drbg(
             ctr_drbg_ready <= 0;
             iv_valid <= 0;
             rst_cbcmac <= 1;
-            cipher_rst_n <= 1;
             provided_data <= 0;
             fsm_state <= INSTANTIATE;
             gen_fsm <= INCREMENT;
@@ -192,7 +195,6 @@ module ctr_drbg(
                         reseed_cntr <= (update_done) ? 1 : 0;
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
-                        cipher_rst_n <= 1;
                         gen_fsm <= INCREMENT;
                         fsm_state <= (health_error) ? RESET_CBCMAC : ((update_done) ? GENERATE_IV : INSTANTIATE);
                     end 
@@ -254,7 +256,6 @@ module ctr_drbg(
 
                         provided_data <= 0;
                         rst_cbcmac <= 1;
-                        cipher_rst_n <= 1;
                         ctr_drbg_ready <= 0;
                     end
 
@@ -281,7 +282,6 @@ module ctr_drbg(
                         reseed_cntr <= (update_done) ? 1 : 0;
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
-                        cipher_rst_n <= 1;
                         gen_fsm <= INCREMENT;
                         fsm_state <= (health_error) ? RESET_CBCMAC : ((update_done) ? GENERATE_IV : RESEED);
                     end
@@ -295,13 +295,11 @@ module ctr_drbg(
                         ctr_drbg_ready <= 0;
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
-                        cipher_rst_n <= 1;
                         fsm_state <= INSTANTIATE;
                         gen_fsm <= INCREMENT;
                     end
                     RESET_CBCMAC: begin  // resetting CBC-MAC since health tests error has occurred
                         rst_cbcmac <= 0;
-                        cipher_rst_n <= 0;  // resets CIPHER so it starts a new along with CTR-DRBG
                         provided_data <= 0;
                         update_enb_n <= 1;
                         reseed_cntr <= 0;
@@ -323,7 +321,6 @@ module ctr_drbg(
                         ctr_drbg_ready <= 0;
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
-                        cipher_rst_n <= 1;
                         fsm_state <= INSTANTIATE;
                         gen_fsm <= INCREMENT;
                     end
@@ -339,7 +336,6 @@ module ctr_drbg(
                 ctr_drbg_ready <= 0;
                 update_enb_n <= 1;
                 rst_cbcmac <= 1;
-                cipher_rst_n <= 1;
                 gen_fsm <= gen_fsm;
                 fsm_state <= fsm_state;
             end
