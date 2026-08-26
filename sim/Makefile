@@ -11,6 +11,7 @@ SYNTH_SCRIPT = $(SYNTH_DIR)/block_lvl_synth.ys
 TRNG_PARAM_FILE = $(RTL_DIR)/trng_param_pkg.sv
 TYPEDEF_PKG = $(RTL_DIR)/type_defs_pkg.sv
 COMPOSITE_MATH_PKG = $(RTL_DIR)/composite_field_math.sv
+DRBG_UTILS = $(RTL_DIR)/drbg_utilities.sv
 
 export PYTHONPYCACHEPREFIX := $(CURDIR)/.cache  # Redirect __pycache__ to the current simulation directory
 export PYTHONDONTWRITEBYTECODE := 1  # Prevent __pycache__ creation in source directories 
@@ -20,6 +21,14 @@ SHELL := /bin/bash
 
 # Cocotb setup
 SIM = verilator
+
+# Per-block build directory. cocotb's Makefile.sim keys its incremental rebuild
+# on source mtimes, not on the elaborated top module, so a single shared
+# sim_build/ silently reuses the previous block's binary when $(block) changes
+# and cocotb then aborts with "Can not find root handle '<block>'". Giving each
+# block its own directory keeps the incremental rebuild while making a block
+# switch a different build.
+SIM_BUILD := sim_build/$(block)
 
 # Tools 
 VERIBLE_LINT = verible-verilog-lint
@@ -81,9 +90,15 @@ GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCiphe
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 
-ifneq ($(filter $(block),trng sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
+# drbg_utilities.sv holds the entropy collector and the SP 800-90B health tests,
+# shared by trng.sv and cbc_mac.sv (and pulled in transitively by every _top
+# wrapper that embeds a real TRNG). health_tests reads RCT_THRESHOLD /
+# APT_BIT_WINDOW / APT_THRESHOLD, so the blocks needing drbg_utilities.sv are
+# exactly the blocks needing trng_param_pkg.sv -- both are added together, with
+# the parameter package first so its imports resolve.
+ifneq ($(filter $(block),trng cbc_mac iv_gen sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
-    VERILOG_SOURCES += $(TRNG_PARAM_FILE)
+    VERILOG_SOURCES += $(TRNG_PARAM_FILE) $(DRBG_UTILS)
 endif
 
 ifeq ($(block),sbox_top)
@@ -96,21 +111,27 @@ else ifeq ($(block),cipher_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/cipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),cipher)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),unmasked_cipher)
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),cbc_mac)
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),ctr_drbg)
+	# ctr_drbg embeds one unmasked_cipher; no health tests or entropy collector,
+	# so drbg_utilities.sv/trng_param_pkg.sv are deliberately not pulled in.
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),iv_gen)
+	# Full entropy pipeline: cbc_mac (conditioner + health tests + collector)
+	# and ctr_drbg, each with its own unmasked_cipher instance.
+	VERILOG_SOURCES += $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/cbc_mac.sv $(RTL_DIR)/ctr_drbg.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invSbox_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/invSbox.sv $(RTL_DIR)/invShiftRows.sv $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invCipher.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invCipher)
-	# invCipher instantiates invSbox/invShiftRows/invMixColumns internally;
-	# addRoundKey is NOT included -- it sits at the same hierarchy level as
-	# invCipher (shared with cipher) and is only wired in by invCipher_top
 	VERILOG_SOURCES += $(RTL_DIR)/invSbox.sv $(RTL_DIR)/invShiftRows.sv $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invAddRoundKey_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invAddRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invAddRoundKey)
-	# invAddRoundKey receives exp_key/ark_done from an externally-wired
-	# AddRoundKey (same sibling-hierarchy pattern as cipher/invCipher) --
-	# it does not instantiate sbox/addRoundKey itself
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),icg)
 	# icg.sv is already in base VERILOG_SOURCES, so not needed here
@@ -125,7 +146,15 @@ TOPLEVEL ?= $(block)
 # design block under test, not the generated verification wrapper, so strip a
 # trailing "_top" when deriving the module name (sbox_top -> sbox_tb,
 # addRoundKey_top -> addRoundKey_tb, cipher_top -> cipher_tb).
-COCOTB_TEST_MODULES ?= $(patsubst %_top,%,$(block))_tb
+#
+# Blocks whose testbench is shared with another block override that default via
+# TB_MODULE_<block>. unmasked_cipher.sv implements the same FIPS 197 CIPHER
+# procedure as cipher.sv (LUT S-Box, no TRNG, AES-256 only), so cipher_tb.py
+# verifies both: it auto-detects the DUT flavor from COCOTB_TOPLEVEL and skips
+# the AES-128/192 known-answer tests when the DUT is AES-256 only.
+TB_MODULE_unmasked_cipher := cipher_tb
+
+COCOTB_TEST_MODULES ?= $(or $(TB_MODULE_$(block)),$(patsubst %_top,%,$(block))_tb)
 
 # handle specific test selection
 ifneq ($(test),)
@@ -134,7 +163,7 @@ ifneq ($(test),)
 endif
 
 # simulates all tests
-all: run_all
+all: run_test_suite
 
 .PHONY: gen_param
 gen_param: $(TRNG_PARAM_FILE)
@@ -150,7 +179,7 @@ ifneq ($(filter $(block),$(GENERATED_TOP_BLOCKS)),)
 endif
 
 # Standalone RTL elaboration check (Verilator only, no cocotb linkage). This is
-# independent of run_test/run_all: cocotb's own `sim` target (pulled in below)
+# independent of run_test/run_test_suite: cocotb's own `sim` target (pulled in below)
 # already compiles incrementally via Make's normal file-mtime tracking, so
 # nothing here needs to duplicate that compile.
 # gen_top is a prerequisite so that _top wrapper blocks are (re)generated
@@ -161,8 +190,8 @@ compile_rtl: gen_top $(BLOCK_DEPS)
 	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
 	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
 
-.PHONY: run_all
-run_all: gen_top $(BLOCK_DEPS)
+.PHONY: run_test_suite
+run_test_suite: gen_top $(BLOCK_DEPS)
 	@echo "Running all tests..."
 	$(MAKE) sim 2>&1 | tee sim.log
 
@@ -252,11 +281,23 @@ sta:
 	$(OPENSTA) -no_init -exit $(SYNTH_DIR)/block_lvl_sta.tcl \
 	2>&1 | tee $(STA_REPORT_DIR)/$(block)_sta.log
 
-.PHONY: clean_all
-clean_all: clean
+# Full-tree cleanup, hooked onto cocotb's own `clean`.
+#
+# cocotb's Makefile.inc declares clean as a DOUBLE-COLON rule (`clean::`), which
+# is its documented extension point: every `clean::` rule in the build runs, in
+# the order the files were read. So the rule below appends to cocotb's cleanup
+# rather than replacing it -- `make clean` first runs cocotb's own (removes
+# $(SIM_BUILD), $(COCOTB_RESULTS_FILE), and the Verilator dump.vcd/dump.fst),
+# then everything here.
+#
+# Keep the double colon. GNU Make refuses to mix `:` and `::` rules for one
+# target ("target file 'clean' has both : and :: entries"), so a single-colon
+# `clean:` here would be a hard error whenever cocotb-config is on PATH.
+.PHONY: clean
+clean::
 	rm -f ./*.vcd ./*.fst ./*.log ./*.xml
 	rm -rf sim_build ./.cache* obj_dir
-	rm -rf $(TB_DIR)/__pycache__  # Remove any Python cache from source directory
+	rm -rf $(TB_DIR)/__pycache__
 	rm -rf $(SYNTH_REPORT_DIR)/
 	rm -rf $(STA_REPORT_DIR)/
 	rm -rf $(LINT_REPORT_DIR)/
