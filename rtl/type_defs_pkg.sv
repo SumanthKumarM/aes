@@ -69,12 +69,11 @@ package type_defs_pkg;
         RST_CBCMAC
     } ctr_drbg_update_states;
 
-    typedef enum logic [2:0] {
+    typedef enum logic [1:0] {
         INSTANTIATE,
         GENERATE_IV,
         RESEED,
-        UNINSTANTIATE,
-        RESET_CBCMAC
+        UNINSTANTIATE
     } ctr_drbg_states;
 
     typedef enum logic [1:0] {

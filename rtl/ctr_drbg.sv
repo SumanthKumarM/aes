@@ -42,9 +42,9 @@ module ctr_drbg(
     ctr_drbg_states fsm_state;
     gen_internal_states gen_fsm;
 
-    // when CTR-DRBG goes to RESET_CBCMAC state it resets all registers so CIPHER is
+    // when CTR-DRBG goes to UNINSTANTIATE state it resets all registers so CIPHER is
     // also required to begin from start but not just resume its operation
-    assign cipher_rst_n = (fsm_state == RESET_CBCMAC) ? 0 : 1;
+    assign cipher_rst_n = (fsm_state == UNINSTANTIATE) ? 0 : 1;
 
     // sub-modules
     icg ICG(gated_clk, (~enb_n | ~rst_n), clk);  // ICG cell to reduce dynamic power consumption
@@ -196,7 +196,7 @@ module ctr_drbg(
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
                         gen_fsm <= INCREMENT;
-                        fsm_state <= (health_error) ? RESET_CBCMAC : ((update_done) ? GENERATE_IV : INSTANTIATE);
+                        fsm_state <= (health_error) ? UNINSTANTIATE : ((update_done) ? GENERATE_IV : INSTANTIATE);
                     end 
 
                     /**
@@ -217,7 +217,7 @@ module ctr_drbg(
                                 regV <= regV + 1;
                                 iv_valid <= 0; 
                                 gen_fsm <= ENCRYPT;
-                                fsm_state <= (health_error) ? RESET_CBCMAC : GENERATE_IV;
+                                fsm_state <= (health_error) ? UNINSTANTIATE : GENERATE_IV;
                             end
                             ENCRYPT: begin  // this state performs encryption which gives IV
                                 update_enb_n <= 1;
@@ -230,7 +230,7 @@ module ctr_drbg(
 
                                 // when health tests fail FSM goes back to INCREMENT so that it can start a new
                                 gen_fsm <= (iv_valid && aes_ready) ? CALL_UPDATE : ENCRYPT;
-                                fsm_state <= (health_error) ? RESET_CBCMAC : GENERATE_IV;
+                                fsm_state <= (health_error) ? UNINSTANTIATE : GENERATE_IV;
                             end
                             CALL_UPDATE: begin  // invokes CTR-DRBG Update function
                                 update_enb_n <= update_done;
@@ -239,7 +239,7 @@ module ctr_drbg(
                                 reseed_cntr <= (update_done) ? ((reseed_cntr == RESEED_LIM) ? 0 : reseed_cntr + 1) : reseed_cntr;
                                 iv_valid <= 0;
                                 gen_fsm <= (update_done) ? INCREMENT : CALL_UPDATE;
-                                if(health_error) fsm_state <= RESET_CBCMAC;
+                                if(health_error) fsm_state <= UNINSTANTIATE;
                                 else fsm_state <= (update_done) ? ((reseed_cntr == RESEED_LIM) ? RESEED : GENERATE_IV) : GENERATE_IV;
                             end
                             default: begin
@@ -283,9 +283,10 @@ module ctr_drbg(
                         iv_valid <= 0;
                         rst_cbcmac <= 1;
                         gen_fsm <= INCREMENT;
-                        fsm_state <= (health_error) ? RESET_CBCMAC : ((update_done) ? GENERATE_IV : RESEED);
+                        fsm_state <= (health_error) ? UNINSTANTIATE : ((update_done) ? GENERATE_IV : RESEED);
                     end
                     UNINSTANTIATE: begin
+                        rst_cbcmac <= 0;  // resetting CBC-MAC since health tests error has occurred
                         update_enb_n <= 1;
                         provided_data <= 0;
                         reseed_cntr <= 0;
@@ -294,33 +295,6 @@ module ctr_drbg(
                         generated_iv <= 0;
                         ctr_drbg_ready <= 0;
                         iv_valid <= 0;
-                        rst_cbcmac <= 1;
-                        fsm_state <= INSTANTIATE;
-                        gen_fsm <= INCREMENT;
-                    end
-                    RESET_CBCMAC: begin  // resetting CBC-MAC since health tests error has occurred
-                        rst_cbcmac <= 0;
-                        provided_data <= 0;
-                        update_enb_n <= 1;
-                        reseed_cntr <= 0;
-                        regKEY <= 0;
-                        regV <= 0;
-                        generated_iv <= 0;
-                        ctr_drbg_ready <= 0;
-                        iv_valid <= 0;
-                        gen_fsm <= INCREMENT;
-                        fsm_state <= INSTANTIATE;
-                    end
-                    default: begin
-                        update_enb_n <= 1;
-                        provided_data <= 0;
-                        reseed_cntr <= 0;
-                        regKEY <= 0;
-                        regV <= 0;
-                        generated_iv <= 0;
-                        ctr_drbg_ready <= 0;
-                        iv_valid <= 0;
-                        rst_cbcmac <= 1;
                         fsm_state <= INSTANTIATE;
                         gen_fsm <= INCREMENT;
                     end
@@ -387,12 +361,7 @@ module ctr_drbg(
                 master_key = update_key;
                 cipher_state_in = update_regV;
             end
-            UNINSTANTIATE, RESET_CBCMAC: begin
-                cipher_enb_n = 1;
-                master_key = 0;
-                cipher_state_in = 0;
-            end
-            default: begin
+            UNINSTANTIATE: begin
                 cipher_enb_n = 1;
                 master_key = 0;
                 cipher_state_in = 0;

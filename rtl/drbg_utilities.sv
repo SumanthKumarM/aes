@@ -3,8 +3,7 @@ import trng_param_pkg::APT_BIT_WINDOW;
 import trng_param_pkg::APT_THRESHOLD;
 
 // entropy collector
-module entropy_clctr #(
-    parameter WIDTH = 64) (
+module entropy_clctr #(parameter WIDTH) (
     output logic [WIDTH-1:0] entropy_word,
     output logic valid,
     input logic rand_bit, ready, clk, rst_n);
@@ -26,7 +25,7 @@ module entropy_clctr #(
             end
             else begin
                 entropy_word <= (entropy_word << 1) | {(WIDTH-1)'(0), rand_bit};
-                sipo_fill_cntr <= sipo_fill_cntr + 1;  // increments when register gets accumulated with rand_bit
+                sipo_fill_cntr <= (sipo_fill_cntr == (SIPO_CNTR_WIDTH)'(WIDTH-1)) ? (SIPO_CNTR_WIDTH)'(0) : sipo_fill_cntr + 1;
             end
             
             // asserting valid signal 

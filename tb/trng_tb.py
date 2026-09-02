@@ -21,9 +21,10 @@ Internal hierarchy probed (Verilator --public-flat-rw):
 Health-test / DRBG parameters are parsed from the generated
 rtl/trng_param_pkg.sv so the TB always matches what the RTL was built with.
 
-Raw-entropy absorb note: keccak absorbs 3 x 64-bit SIPO words (rx_cntr 0..2
-fill temp_entropy[191:0]; when rx_cntr==3 the state is seeded and PERMUTE
-starts), so the first key appears ~200 clk after reset with live noise.
+Raw-entropy absorb note: keccak absorbs a single 192-bit SIPO word in one
+shot (entropy_clctr#(192); no more rx_cntr multi-word merge) as soon as
+`valid` is seen, so the first key appears ~200 clk after reset with live
+noise.
 
 Design intent (current RTL): fail-fast, no recovery. There is no
 ERROR_RECOVERY state and no total_failure/consecutive-error counting — a
@@ -50,7 +51,7 @@ SCLK_PERIOD_NS = 2
 RESET_CYCLES   = 8
 NOISE_BUF_SIZE = 5000
 
-ENTROPY_WORD_BITS   = 64
+ENTROPY_WORD_BITS   = 192
 KECCAK_PERMUTE_RNDS = 24
 RAND_WORD_BITS      = 1680
 
@@ -308,20 +309,20 @@ async def e2e_op_test(dut):
     dut._log.info("✓ get_raw_entropy = 1 (raw entropy path active)")
 
     # The FIRST key must be seeded from raw noise: keccak has to sit in
-    # ABSORB handshaking SIPO words (rx_cntr advancing) before its first
-    # PERMUTE. If it already left ABSORB it sampled get_raw_entropy=0 on the
-    # cycle after reset and DRBG-absorbed an all-zero state — a
-    # deterministic, zero-entropy first key.
+    # ABSORB collecting the SIPO word before its first PERMUTE. If it
+    # already left ABSORB it sampled get_raw_entropy=0 on the cycle after
+    # reset and DRBG-absorbed an all-zero state — a deterministic,
+    # zero-entropy first key.
     assert int(dut.KECCAK_COND.fsm_state.value) == KEC_ABSORB, (
         "Keccak left ABSORB before raw entropy was available — first key is "
         "DRBG-generated from the all-zero reset state (deterministic, zero "
         "entropy); raw noise is not absorbed until drbg_cntr wraps "
         f"({DRBG_CYCLES} keys)")
-    await wait_signal(dut.KECCAK_COND.rx_cntr, value=1,
+    await wait_signal(dut.valid, value=1,
                       timeout=2 * ENTROPY_WORD_BITS, clk=dut.clk)
-    dut._log.info("✓ Keccak accepted first raw SIPO word (rx_cntr=1)")
+    dut._log.info("✓ Keccak's SIPO word is ready (valid=1)")
 
-    # 3 x 64-bit SIPO words feed the absorb, ~64 clk each
+    # The 192-bit SIPO word feeds the absorb in a single shot, ~192 clk
     await wait_signal(dut.KECCAK_COND.fsm_state, value=KEC_PERMUTE, timeout=500, clk=dut.clk)
     dut._log.info("✓ Keccak entered PERMUTE (entropy absorbed)")
 
@@ -642,28 +643,27 @@ async def sipo_test(dut):
     await wait_signal(dut.CONTROL_UNIT.noise_src_enb_n, value=0, timeout=20, clk=dut.clk)
     dut._log.info("✓ Noise enabled (BIST)")
 
-    # Check 2: SIPO fills and valid asserts within 64+10 cycles
+    # Check 2: SIPO fills and valid asserts within ENTROPY_WORD_BITS+10 cycles
     await wait_signal(dut.valid, value=1, timeout=ENTROPY_WORD_BITS + 10, clk=dut.clk)
     ew = int(dut.entropy_word.value)
-    dut._log.info(f"✓ valid asserted — entropy_word = 0x{ew:016X}")
+    dut._log.info(f"✓ valid asserted — entropy_word = 0x{ew:0{ENTROPY_WORD_BITS // 4}X}")
     assert ew != 0, "entropy_word is all-zero — no bits shifted in"
 
     # Check 3: entropy word bit balance
     bit_count = bin(ew).count('1')
-    dut._log.info(f"  bit count = {bit_count}/64")
-    assert 10 <= bit_count <= 54, \
-        f"entropy_word bit balance suspicious: {bit_count}/64 ones"
+    dut._log.info(f"  bit count = {bit_count}/{ENTROPY_WORD_BITS}")
+    lo, hi = int(0.15625 * ENTROPY_WORD_BITS), int(0.84375 * ENTROPY_WORD_BITS)
+    assert lo <= bit_count <= hi, \
+        f"entropy_word bit balance suspicious: {bit_count}/{ENTROPY_WORD_BITS} ones"
     dut._log.info("✓ entropy_word bit balance OK")
 
-    # Check 4: keccak handshakes the word away (ready held during raw absorb,
-    # rx_cntr increments per accepted word; after 3 words -> PERMUTE)
+    # Check 4: keccak absorbs the 192-bit word in a single shot once valid
+    # is seen, then moves straight to PERMUTE (no more multi-word handshake)
     assert int(dut.KECCAK_COND.fsm_state.value) == KEC_ABSORB, \
-        "Keccak should still be in ABSORB while collecting SIPO words"
-    await wait_signal(dut.KECCAK_COND.rx_cntr, value=1, timeout=10, clk=dut.clk)
-    dut._log.info("✓ Keccak accepted SIPO word 1 (rx_cntr=1)")
+        "Keccak should still be in ABSORB while collecting the SIPO word"
 
     await wait_signal(dut.KECCAK_COND.fsm_state, value=KEC_PERMUTE,
-                      timeout=3 * ENTROPY_WORD_BITS + 50, clk=dut.clk)
+                      timeout=ENTROPY_WORD_BITS + 50, clk=dut.clk)
     dut._log.info("✓ Keccak entered PERMUTE after absorbing raw entropy")
 
     # Check 5: full key emerges and system stays healthy
