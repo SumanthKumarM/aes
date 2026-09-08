@@ -1,23 +1,380 @@
-= Composite Masked AES S-Box — Project Documentation
-:description: Master document for the masked AES S-Box, TRNG, and the full Cipher/InvCipher encryption and decryption datapaths
+= AES Encryption Engine — Design Specification
+:description: Design specification for the side-channel-hardened AES engine — top-level modes of operation, block cipher datapath, masked S-Box, key schedule, TRNG and IV generator
 :toc:
 :toc-title: Table of Contents
 :sectnums:
 :doctype: book
 :stem:
 
-This document provides consolidated technical documentation for the Composite Masked AES S-Box implementation.
-It covers the True Random Number Generator (TRNG) that supplies randomness for masked operations, the masked S-Box and inverse S-Box implementations, the KeyExpansion/AddRoundKey and INVCIPHER key-schedule datapaths, and the top-level Cipher and InvCipher blocks that integrate these components into complete AES encryption and decryption engines.
+This document is the design specification for the AES encryption engine. It covers the block from the external interface inward: the top-level `aes` module and its five NIST SP 800-38A modes of operation, the FIPS 197 Cipher and InvCipher datapaths, the first-order masked S-Box and its inverse, the multi-key-size key schedule, and the two entropy consumers — the TRNG that supplies masking randomness and the IV generator that produces unpredictable initialization vectors.
 
-include::trng.adoc[leveloffset=+1]
+Each major block is specified in its own chapter. Chapters covering the S-Box, key expansion, TRNG and IV generator carry their own derivations and are maintained as separate documents, included here so that the whole design reads as one specification.
 
-include::sbox.adoc[leveloffset=+1]
+== AES Engine Overview
 
-include::invSbox.adoc[leveloffset=+1]
+=== Scope
 
-include::keyExp_logic.adoc[leveloffset=+1]
+The `aes` module is a single-block-in, single-block-out AES engine. It accepts 128-bit plaintext or ciphertext blocks over a VALID/READY handshake, applies the configured mode and direction, and returns 128-bit result blocks over a second VALID/READY handshake. All three FIPS 197 key sizes are supported — AES-128, AES-192 and AES-256 — selected at runtime through the `key_size` port.
 
-include::invCipher_keyExp.adoc[leveloffset=+1]
+Five modes of operation from NIST SP 800-38A are implemented: ECB, CBC, CFB, OFB and CTR. Encryption and decryption are selected by a single bit of the `mode` port. CFB additionally supports all five standard segment sizes (8, 16, 32, 64 and 128 bits).
+
+The engine is intended for integration as a subordinate block in an SoC: a manager configures `mode`, `key_size` and `master_key`, streams message blocks in, and collects results. Chaining state is held internally for the duration of a message and is reset by the `first` sideband at the start of the next one, so the manager is not required to feed back ciphertext or IVs between blocks.
+
+=== Module Hierarchy
+
+----
+aes                         top level: interface, mode FSMs, chaining state
+├── icg                     clock gate for the whole block
+├── trng                    masking randomness for the S-Box datapaths
+├── sbox                    masked SubBytes, shared by cipher and addRoundKey
+├── addRoundKey             KeyExpansion + AddRoundKey, shared by cipher and invCipher
+├── cipher                  FIPS 197 CIPHER()
+│   ├── shiftRows
+│   └── mixColumns
+├── invCipher               FIPS 197 INVCIPHER()
+│   ├── invSbox             masked InvSubBytes
+│   ├── invShiftRows
+│   ├── invMixColumns
+│   └── invAddRoundKey      reverse-order round-key service on top of addRoundKey
+└── iv_gen                  unpredictable IV generation
+    ├── cbc_mac             CBC-MAC entropy conditioner
+    └── ctr_drbg            SP 800-90A CTR_DRBG
+        └── unmasked_cipher AES-256 core used by the DRBG and the conditioner
+----
+
+`sbox` and `addRoundKey` are instantiated once at the top level and shared. `cipher` and `invCipher` do not own them; they drive them through enable and handshake ports, and the top level multiplexes those ports to whichever engine is active. This keeps a single copy of the masked S-Box and a single key-expansion datapath in the design, at the cost of the arbitration logic described in <<Cipher>> and <<InvCipher>>.
+
+`unmasked_cipher` is a plain, unmasked AES-256 core used only inside the IV generator. The IV path processes raw entropy rather than user plaintext and is not a side-channel target in the same sense as the main datapath, so it does not carry the masking overhead.
+
+=== Clocking and Reset
+
+The block runs on a single clock, `clk`, gated by an `icg` cell whose enable is `(~enb_n | ~rst_n)`. All sequential logic in `aes` and in every sub-block is clocked from the resulting `gated_clk`. Reset is synchronous and active low; because the ICG enable includes `~rst_n`, the gated clock continues to run while reset is asserted, so the reset is always applied.
+
+A second clock, `sampling_clk`, is an independent high-frequency clock used only by the TRNG to sample its ring-oscillator entropy source. It is not used by any other logic in the block.
+
+`raw_rand_bit_trng` and `raw_rand_bit_cbc_mac` are the two external noise-source inputs, feeding the TRNG and the IV generator's conditioner respectively.
+
+=== Side-Channel Posture
+
+The S-Box is the only non-linear element of AES and is therefore the primary side-channel target. Both the forward and inverse S-Boxes are implemented as first-order Boolean-masked composite-field inverters, consuming fresh randomness from the TRNG on every evaluation. The remaining round transforms — ShiftRows, MixColumns and AddRoundKey — are linear and are applied to the masked shares directly.
+
+The masking countermeasure depends on the TRNG remaining healthy. If the TRNG's health tests fail permanently it asserts a dead flag, which resets the entropy path. Surfacing that condition to the interface is a planned addition to the register layer and is noted in <<Known Limitations>>.
+
+== Interface
+
+The block presents a SystemVerilog interface, `aes_interface`, with a single modport `aes_intf`. A flat-port wrapper, `aes_top`, is generated for simulation and synthesis flows that cannot elaborate an interface on a top-level port.
+
+=== Port Summary
+
+[cols="1,1,1,4",options="header"]
+|===
+| Port | Width | Direction | Description
+
+| `clk`                  | 1   | in  | Main clock; gated internally by `enb_n` and `rst_n`
+| `sampling_clk`         | 1   | in  | Independent high-frequency clock for TRNG entropy sampling
+| `rst_n`                | 1   | in  | Active-low synchronous reset
+| `enb_n`                | 1   | in  | Active-low enable; gates the block's clock
+| `raw_rand_bit_trng`    | 1   | in  | Raw noise-source bit for the masking TRNG
+| `raw_rand_bit_cbc_mac` | 1   | in  | Raw noise-source bit for the IV generator's conditioner
+| `input_block`          | 128 | in  | Plaintext or ciphertext block
+| `inVALID`              | 1   | in  | Input-channel VALID
+| `inREADY`              | 1   | out | Input-channel READY
+| `output_block`         | 128 | out | Result block
+| `outVALID`             | 1   | out | Output-channel VALID
+| `outREADY`             | 1   | in  | Output-channel READY
+| `mode`                 | 4   | in  | `mode[2:0]` selects the mode, `mode[3]` selects the direction
+| `key_size`             | 2   | in  | AES key size
+| `master_key`           | 256 | in  | Master key; the active slice is determined by `key_size`
+| `encCntxtIn`           | 128 | in  | IV or initial counter supplied by the manager
+| `encCntxtOut`          | 128 | out | IV or initial counter reported by the engine
+| `first`                | 1   | in  | Marks the first block of a message
+| `cfb_seg_bits`         | 3   | in  | CFB segment size
+| `partial`              | 1   | in  | Marks the final block as partial (OFB and CTR)
+| `valid_bits`           | 7   | in  | Number of valid bits in a partial block
+|===
+
+=== Configuration Encodings
+
+.`mode[2:0]` — mode of operation
+[cols="1,3",options="header"]
+|===
+| Encoding | Mode
+| `000` | Reset value; no mode selected
+| `001` | ECB
+| `010` | CBC
+| `011` | CFB
+| `100` | OFB
+| `101` | CTR
+|===
+
+`mode[3]` selects direction: `0` for encryption, `1` for decryption.
+
+.`key_size`
+[cols="1,3",options="header"]
+|===
+| Encoding | Key size
+| `00` | Reset value; not a valid key size
+| `01` | AES-128 (`Nk` = 4, `Nr` = 10)
+| `10` | AES-192 (`Nk` = 6, `Nr` = 12)
+| `11` | AES-256 (`Nk` = 8, `Nr` = 14)
+|===
+
+.`cfb_seg_bits` — CFB segment size, ignored outside CFB
+[cols="1,2,2",options="header"]
+|===
+| Encoding | Segment size | Segments per block
+| `000` | Reset value | —
+| `001` | CFB8   | 16
+| `010` | CFB16  | 8
+| `011` | CFB32  | 4
+| `100` | CFB64  | 2
+| `101` | CFB128 | 1
+|===
+
+`mode`, `key_size`, `master_key` and `cfb_seg_bits` are static configuration. They must be stable for the duration of a message and may only change between messages, at a point where the engine is idle.
+
+=== Handshake Protocol
+
+Both channels use a standard VALID/READY handshake. A transfer occurs on a rising `gated_clk` edge at which both VALID and READY are high.
+
+On the input channel the manager asserts `inVALID` together with `input_block` and the sidebands (`first`, `partial`, `valid_bits`, `encCntxtIn`), and the engine asserts `inREADY` when it can accept a block. On the output channel the engine asserts `outVALID` with `output_block` and `encCntxtOut`, and holds both stable until the manager asserts `outREADY`.
+
+The engine guarantees the producer-side obligations on its output channel: once `outVALID` is asserted it remains asserted until a cycle in which `outREADY` is also high, and `output_block` and `encCntxtOut` do not change during that window.
+
+The manager is required to hold input-channel signals from the cycle it asserts `inVALID` until it observes `inREADY`, and may release them on the transfer edge. It is not required to hold them any longer than that. Every input-channel sideband that the engine needs after the transfer — `first`, `partial` and `valid_bits` — is latched internally at the handshake, so releasing them immediately is safe.
+
+The engine processes one block at a time. There is no input pipelining: `inREADY` is deasserted for the whole of the cipher computation and reasserted only once the result has been accepted on the output channel.
+
+=== Enable and Clock Gating
+
+Raising `enb_n` gates the block's clock off. Every register in the design holds its value, including `inREADY` and `outVALID`. This is a *freeze*, not a reset: a result that was pending when the block was disabled is still pending when it is re-enabled, and is delivered intact.
+
+Freezing rather than discarding is deliberate. A manager that has requested a block owns that request; if it disables the engine before collecting the result, holding the result preserves data integrity and keeps the output channel's VALID/READY obligations true across the disable, which clearing the handshake would not.
+
+[IMPORTANT]
+====
+A disabled engine has no clock and therefore cannot observe a handshake. The manager must not drive `outREADY` or `inVALID` at a disabled engine — the transfer will not be seen, and the block will re-present the same result when re-enabled. Complete or abandon outstanding transfers before raising `enb_n`.
+====
+
+=== Data Representation
+
+All 128-bit data ports — `input_block`, `output_block`, `encCntxtIn` and `encCntxtOut` — carry a block in `state_matrix_t` byte order, the internal representation used throughout the cipher datapath. `state_matrix_t` is declared as `logic [3:0][3:0][7:0]`, so element `[row][col]` occupies byte lane `4*row + col` of the 128-bit word.
+
+The mapping from a FIPS 197 input block `b[0..15]` to that packing is:
+
+----
+NIST byte b[r + 4c]  ->  bit ((3 - r) * 4 + c) * 8      for 0 <= r, c < 4
+----
+
+Equivalently, NIST byte `b[i]` occupies byte lane `4 * (3 - (i % 4)) + (i / 4)`. The first byte of a NIST block, `b[0]`, therefore sits at bits `[103:96]`, and the last, `b[15]`, at bits `[31:24]`.
+
+`master_key` uses a different convention: FIPS 197 key word `w[i]` occupies bits `[32*i +: 32]`. Only the low `32 * Nk` bits are read; the remainder is ignored.
+
+A manager speaking NIST byte order must apply the permutation above at the block boundary. It applies uniformly to data, IVs and counters.
+
+== Modes of Operation
+
+=== Common Control Structure
+
+Every mode is implemented as a two-state FSM, `ARM` and `SHOOT`, in a single sequential block selected on `mode[2:0]`.
+
+`ARM` presents `inREADY`, accepts a block when the handshake completes, computes that block's cipher input from the mode's chaining rule, and enables the cipher. `SHOOT` deasserts `inREADY`, waits for the cipher to complete, forms the output block, asserts `outVALID`, and returns to `ARM` once the result has been accepted.
+
+The chaining state that carries across blocks within a message is held in the registers `temp`, `_temp`, `ctr_mode_cntr` and `output_block`, with `seg_cntr` tracking segment position in CFB. That state must not carry from one message to the next, which is what `first` is for.
+
+`first` is asserted by the manager on the first block of a message and deasserted for all subsequent blocks. It selects the mode's initial condition — an IV, a counter, or in CFB a reset of the segment counter — and is ignored entirely in ECB, which has no chaining state. Because the manager may release `first` on the input transfer edge, modes that need it after the handshake latch it internally.
+
+Throughput is dominated by the masked S-Box, which is multi-cycle per byte. In steady state one 128-bit block requires roughly 195 to 200 gated-clock cycles for AES-128, scaling with `Nr` for the larger key sizes.
+
+=== ECB
+
+Electronic Codebook applies the block cipher to each block independently, with no chaining and no IV:
+
+----
+Cj = CIPHER(Pj, K)          encryption
+Pj = INVCIPHER(Cj, K)       decryption
+----
+
+Encryption routes `input_block` straight to `cipher`; decryption routes it to `invCipher`. `first`, `encCntxtIn`, `partial` and `valid_bits` have no meaning in this mode and are ignored, and `encCntxtOut` is driven to zero.
+
+ECB is the only mode in which decryption uses `invCipher`, alongside CBC. CFB, OFB and CTR build their keystream from the forward cipher in both directions.
+
+=== CBC
+
+Cipher Block Chaining XORs each plaintext block with the previous ciphertext block before encryption:
+
+----
+C0 = CIPHER(P0 xor IV,   K)
+Cj = CIPHER(Pj xor Cj-1, K)     encryption
+
+P0 = INVCIPHER(C0, K) xor IV
+Pj = INVCIPHER(Cj, K) xor Cj-1  decryption
+----
+
+On encryption the IV is generated internally by `iv_gen`. `ARM` waits for both a valid input block and `iv_valid` before starting, XORs the first block with the generated IV, and reports that IV on `encCntxtOut` so the manager can store it for later decryption. Subsequent blocks XOR with the previous ciphertext, taken directly from the `output_block` register.
+
+On decryption the IV is supplied by the manager on `encCntxtIn` and captured into `_temp` at the input handshake. `invCipher` operates on the raw ciphertext, and the XOR is applied to its output: with the IV for the first block, and with the previous ciphertext — retained in `temp` — for the rest. Because the direction of the XOR differs between the first block and the rest, `first` is latched into `first_q` in `ARM` and cleared once the block that needs it has completed; the manager's release of `first` at the transfer edge does not affect it. `encCntxtOut` is driven to zero on the decrypt path, so a decrypting instance does not echo a context value back.
+
+=== CFB
+
+Cipher Feedback turns the block cipher into a self-synchronising stream cipher over `s`-bit segments:
+
+----
+I0 = IV
+Ij = LSB(b-s)(Ij-1) | Cj-1      for j = 1 .. n
+Oj = CIPHER(Ij, K)              for j = 0, 1 .. n
+Cj = Pj xor MSB(s)(Oj)          encryption
+Pj = Cj xor MSB(s)(Oj)          decryption
+----
+
+The segment size is selected by `cfb_seg_bits` and may be 8, 16, 32, 64 or 128 bits. A full cipher invocation is required per segment, so a 128-bit block costs one cipher run at CFB128 and sixteen at CFB8.
+
+The 128-bit shift register `cipherIn` holds `Ij`. Each segment shifts it left by `s` bits and appends the segment of ciphertext just produced — taken from `output_block` on the encrypt path and from `_temp`, which accumulates the incoming ciphertext, on the decrypt path. `seg_cntr` tracks position within the block and `seg_cntr_lim` holds the last segment index for the configured size; `outVALID` is asserted only once the final segment of a block has been computed and accumulated.
+
+`ARM` serves two distinct purposes in this mode. When `seg_cntr` is zero it accepts a new input block through the handshake, which takes as many cycles as the manager needs. When `seg_cntr` is non-zero it advances the shift register by one segment, which takes exactly one cycle and involves no handshake. Nothing in `ARM` may commit before the input transfer in the first case, since the feedback shift is self-referential and applying it twice would corrupt every later segment.
+
+Asserting `first` overrides the segment position and restarts the message: the segment counter is cleared, `inREADY` is granted on `iv_valid`, and the shift register is reloaded with the initial condition. This allows a message to be abandoned mid-block and a new one started without a reset.
+
+As in CBC, the encrypt path generates its IV internally and reports it on `encCntxtOut`, while the decrypt path takes it from `encCntxtIn` and drives `encCntxtOut` to zero.
+
+=== OFB
+
+Output Feedback generates a keystream by repeatedly re-encrypting the cipher output, independently of the data:
+
+----
+I0 = IV
+Ij = Oj-1                       for j = 1 .. n
+Oj = CIPHER(Ij, K)              for j = 0, 1 .. n
+Cj = Pj xor Oj                  encryption
+Pj = Cj xor Oj                  decryption
+----
+
+The feedback path takes the raw cipher output, not the ciphertext, so the keystream is identical in both directions and OFB decryption uses the forward cipher. The input block is captured into `temp` at the handshake and XORed with the cipher output when the cipher completes.
+
+The IV is generated internally on the encrypt path and reported on `encCntxtOut`; on the decrypt path it is supplied on `encCntxtIn` and `encCntxtOut` is driven to zero. OFB supports partial final blocks, described in <<Partial Final Blocks>>.
+
+=== CTR
+
+Counter mode generates a keystream by encrypting successive values of a counter block:
+
+----
+Oj = CIPHER(Tj, K)              for j = 0, 1 .. n
+Cj = Pj xor Oj                  encryption
+Pj = Cj xor Oj                  decryption
+----
+
+No IV generator is involved. On encryption the engine maintains the counter internally in `ctr_mode_cntr` and reports the value used for the first block on `encCntxtOut`, so the manager can replay the same sequence when decrypting. On decryption the starting counter is supplied on `encCntxtIn` and advanced in `_temp`.
+
+The counter is not loaded from `encCntxtIn` on the encrypt path, and is cleared only by reset. A manager therefore cannot choose the starting counter for encryption; it receives whichever value the engine had reached. This is deliberate — it is what guarantees that no counter value is reused across messages under the same key, which is the security property CTR actually depends on.
+
+==== Counter Successor Function
+
+The successor function is the standard incrementing function of SP 800-38A Appendix B.1 applied to the whole 128-bit counter block, that is, an ordinary increment of the counter block in its natural byte order with the carry rippling from `b[15]` down to `b[0]`.
+
+`ctr_mode_cntr` and `_temp` hold the counter as an ordinary 128-bit integer in that byte order, so `+ 1` on them is the standard incrementing function directly. The permutation into `state_matrix_t` packing is applied where the counter meets the cipher datapath and the interface, not where it is incremented:
+
+* `ctr_sm` — `ctr_mode_cntr` in `state_matrix_t` packing, driven to `cipherIn` and reported on `encCntxtOut`
+* `dctr_sm` — `_temp` in `state_matrix_t` packing, driven to `cipherIn` on the decrypt path
+* `ectx_ctr` — `encCntxtIn` converted back to counter order, used to seed `_temp`
+
+All three are pure byte permutations, computed combinationally and costing no logic. Keeping the counter registers in counter-block order rather than packed order is what allows the increment to remain a plain `+ 1`; the alternative, incrementing a packed counter, would require the carry to ripple across a scattered byte order and would leave the register holding something other than an ordinary number.
+
+The distinction matters for interoperability rather than security. Both a packed increment and a counter-order increment produce unique counters, but only the counter-order one reproduces the same keystream as a standard CTR peer given nothing but `encCntxtOut`.
+
+=== Partial Final Blocks
+
+OFB and CTR are stream modes and do not require the message length to be a multiple of the block size. A manager signals a short final block by asserting `partial` with the input transfer and placing the valid bit count on `valid_bits`. The engine keeps the most significant `valid_bits` bits of the result and zeroes the remainder:
+
+----
+output_block = (temp xor cipherOut) & ({128{1'b1}} << (128 - valid_bits))
+----
+
+The mask is formed as `{128{1'b1}} << (~valid_bits + 7'd1)`, which is the seven-bit two's complement of `valid_bits` and therefore evaluates to `128 - valid_bits` over the usable range.
+
+Both sidebands are latched at the input handshake into `partial_q` and `valid_bits_q` on the same condition that captures the data block itself, so the mask is guaranteed to belong to the block it is applied to. They are read in `SHOOT` from the latched copies and cleared once the block has been emitted. The manager may release `partial` and `valid_bits` on the transfer edge like any other input-channel sideband.
+
+The usable range for `valid_bits` is 1 to 127. See <<Known Limitations>> for the boundary cases.
+
+=== Initialization Vector and Counter Handling
+
+The `encCntxtIn` and `encCntxtOut` ports carry whichever chaining context the active mode requires, and their use is summarised below.
+
+[cols="1,1,2,2",options="header"]
+|===
+| Mode | Direction | `encCntxtIn` | `encCntxtOut`
+
+| ECB | both      | ignored              | zero
+| CBC | encrypt   | ignored              | generated IV
+| CBC | decrypt   | IV                   | zero
+| CFB | encrypt   | ignored              | generated IV
+| CFB | decrypt   | IV                   | zero
+| OFB | encrypt   | ignored              | generated IV
+| OFB | decrypt   | IV                   | zero
+| CTR | encrypt   | ignored              | counter used for block 0
+| CTR | decrypt   | initial counter      | zero
+|===
+
+For CBC, CFB and OFB encryption the IV is produced by `iv_gen`, which conditions raw noise through a CBC-MAC and drives an SP 800-90A CTR_DRBG. The engine will not accept the first block of such a message until `iv_valid` is asserted, so the first message after reset carries the DRBG's instantiation latency. Subsequent IVs are produced while the previous message is still being processed and are normally available immediately.
+
+The IV is reported on `encCntxtOut` alongside the first output block. A manager that intends to decrypt the message later must capture it at that point.
+
+=== Behaviour Outside the Defined Encodings
+
+An undecoded `mode[2:0]` — `000`, `110` or `111` — selects the FSM's default branch, which holds every output deasserted and every register cleared. The engine is inert: no handshake completes and no state is disturbed.
+
+An undecoded `cfb_seg_bits` in CFB mode is treated as a single-segment block and produces a zeroed output block. The condition is contained — it does not hang the engine or corrupt state, and a correctly configured message run immediately afterwards is unaffected — but it is not currently rejected. Policing invalid configuration is deferred to the register layer; see <<Known Limitations>>.
+
+== Cipher
+
+The `cipher` module is the top-level datapath that coordinates `SubBytes` (via `sbox`), `ShiftRows`, `MixColumns`, and `AddRoundKey` into the complete AES encryption round structure. Unlike the S-Box, InvSBox, TRNG, and AddRoundKey blocks, the `cipher` module contains no independent design derivation. It is a direct structural implementation of the FIPS 197 `Cipher()` procedure (Section 5.1):
+
+----
+procedure CIPHER(in, Nr, w)
+    state <- in
+    state <- ADDROUNDKEY(state, w[0..3])
+    for round from 1 to Nr-1 do
+        state <- SUBBYTES(state)
+        state <- SHIFTROWS(state)
+        state <- MIXCOLUMNS(state)
+        state <- ADDROUNDKEY(state, w[4*round..4*round+3])
+    end for
+    state <- SUBBYTES(state)
+    state <- SHIFTROWS(state)
+    state <- ADDROUNDKEY(state, w[4*Nr..4*Nr+3])
+    return state
+end procedure
+----
+
+The `cipher` module instantiates `shiftRows` and `mixColumns` directly, and drives the shared `sbox` and `addRoundKey` instances through enable and handshake ports wired in from the top level. Sequencing is controlled by an internal FSM (`PRE_ADDROUNDKEY` / `ADDROUNDKEY` states) gated by `round_cntr` and `Nr` (the round count for the active key size — 10/12/14 for AES-128/192/256 per link:keyExp_logic.adoc[KeyExpansion & AddRoundKey]). The routing of random bits from the TRNG to the S-Box and the S-Box/AddRoundKey handshake timing follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation] and link:trng.adoc[TRNG Implementation].
+
+`cipherIn` is latched into the round state on the first enabled clock edge, at `round_cntr == 0`. The top level therefore asserts the cipher's enable and its input on the same edge, so that the value latched is the one intended for that block.
+
+== InvCipher
+
+The `invCipher` module is the top-level datapath that coordinates `InvSubBytes` (via `invSbox`), `InvShiftRows`, `InvMixColumns`, and the inverse key-addition datapath (`invAddRoundKey`, see link:invCipher_keyExp.adoc[AES INVCIPHER Key Expansion Strategy]) into the complete AES decryption round structure. Like `cipher`, it contains no independent design derivation of its own — it is a direct structural implementation of the FIPS 197 `InvCipher()` procedure (Section 5.3):
+
+----
+procedure INVCIPHER(in, Nr, w)
+    state <- in
+    state <- ADDROUNDKEY(state, w[4*Nr..4*Nr+3])
+    for round from Nr-1 downto 1 do
+        state <- INVSHIFTROWS(state)
+        state <- INVSUBBYTES(state)
+        state <- ADDROUNDKEY(state, w[4*round..4*round+3])
+        state <- INVMIXCOLUMNS(state)
+    end for
+    state <- INVSHIFTROWS(state)
+    state <- INVSUBBYTES(state)
+    state <- ADDROUNDKEY(state, w[0..3])
+    return state
+end procedure
+----
+
+Unlike `cipher`, which sits alongside `sbox` and `addRoundKey` as sibling modules wired together at the level above, `invCipher` instantiates `invShiftRows`, `invSbox`, `invMixColumns`, and `invAddRoundKey` directly as its own sub-modules; only the externally shared `addRoundKey` block, which `invAddRoundKey` drives to build its key-schedule buffer, remains wired in from above. Sequencing is controlled by an internal FSM (`PRE_INVADDROUNDKEY` / `INVADDROUNDKEY` states) gated by a round counter that, unlike `cipher`'s, counts down from `Nr` to `0` to match `InvCipher()`'s reverse traversal of the round-key schedule. Round `Nr`'s initial ADDROUNDKEY step runs through a separate, simpler code path with no InvShiftRows/InvSubBytes/InvMixColumns, since it is the schedule's starting point rather than its end.
+
+The reroute between `invShiftRows`'s output and `invSbox`'s input, and the write-back of `invSbox`'s output into the round state, both use the same explicit byte-index mapping in each direction, keeping the state matrix from being transposed as it passes through the masked S-Box. The routing of random bits from the TRNG to `invSbox`, and the invSbox/invCipher handshake timing, follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation], link:invSbox.adoc[Composite Masked Inverse AES S-Box Implementation], and link:trng.adoc[TRNG Implementation].
+
+Because `addRoundKey` is shared and its key expansion runs forward only, the top level selects which round index it serves — `cipher`'s or `invCipher`'s — from which engine has actually pulled the shared enable low, not from which engine is nominally running. The two differ during the window in which `invAddRoundKey` restarts key collection at the end of the previous block, and selecting on the wrong signal leaves stale round keys in the schedule buffer.
 
 == ShiftRows & MixColumns
 
@@ -40,7 +397,7 @@ Row 0 is unchanged; rows 1–3 are cyclically shifted left by 1, 2, and 3 byte p
 [03 01 01 02]   [s3,c]
 ----
 
-`cipher` instantiates both blocks directly (see below) and sequences them between `SubBytes` and `AddRoundKey` each round, per FIPS 197 `CIPHER()`.
+`cipher` instantiates both blocks directly and sequences them between `SubBytes` and `AddRoundKey` each round, per FIPS 197 `CIPHER()`.
 
 == InvShiftRows & InvMixColumns
 
@@ -65,52 +422,59 @@ Row 0 is unchanged; rows 1-3 are cyclically shifted right by 1, 2, and 3 byte po
 
 Each of the four constant GF(2^8) multipliers this matrix requires (`0x9`, `0xb`, `0xd`, `0xe`) is implemented as its own helper function built from repeated applications of `xTimes()` (the standard `GF(2^8)` doubling operation, reduction polynomial `x^8+x^4+x^3+x+1`), following the usual decomposition of each multiplier into a short sum of doublings — for example, `n*0x0e = xTimes(xTimes(xTimes(n))) xor xTimes(xTimes(n)) xor xTimes(n)`.
 
-`invCipher` instantiates both blocks directly (see below) and sequences them between `InvSubBytes` and `AddRoundKey` each round, per FIPS 197 `INVCIPHER()`.
+`invCipher` instantiates both blocks directly and sequences them between `InvSubBytes` and `AddRoundKey` each round, per FIPS 197 `INVCIPHER()`.
 
-== Cipher
+include::sbox.adoc[leveloffset=+1]
 
-The `cipher` module is the top-level datapath that coordinates `SubBytes` (via `sbox`), `ShiftRows`, `MixColumns`, and `AddRoundKey` into the complete AES encryption round structure. Unlike the S-Box, InvSBox, TRNG, and AddRoundKey blocks, the `cipher` module contains no independent design derivation. It is a direct structural implementation of the FIPS 197 `Cipher()` procedure (Section 5.1):
+include::invSbox.adoc[leveloffset=+1]
 
+include::keyExp_logic.adoc[leveloffset=+1]
+
+include::invCipher_keyExp.adoc[leveloffset=+1]
+
+include::trng.adoc[leveloffset=+1]
+
+include::iv_generator.adoc[leveloffset=+1]
+
+== Verification
+
+Each block carries its own cocotb testbench under `aes/tb/`, run against Verilator through the flow in `aes/sim/Makefile`. Block-level suites exist for the S-Box, inverse S-Box, AddRoundKey, InvAddRoundKey, Cipher, InvCipher, TRNG, CBC-MAC and the IV generator.
+
+The top level is verified by `aes_sequence.py`, a 54-test suite covering reset and enable behaviour, configuration handling, each mode against the NIST vectors, handshake and protocol conformance, and randomised stress:
+
+[source]
 ----
-procedure CIPHER(in, Nr, w)
-    state <- in
-    state <- ADDROUNDKEY(state, w[0..3])
-    for round from 1 to Nr-1 do
-        state <- SUBBYTES(state)
-        state <- SHIFTROWS(state)
-        state <- MIXCOLUMNS(state)
-        state <- ADDROUNDKEY(state, w[4*round..4*round+3])
-    end for
-    state <- SUBBYTES(state)
-    state <- SHIFTROWS(state)
-    state <- ADDROUNDKEY(state, w[4*Nr..4*Nr+3])
-    return state
-end procedure
-----
-
-The `cipher` module instantiates `sbox`, `shiftRows`, `mixColumns`, and `addRoundKey` as sub-modules, controlling their sequencing through an internal FSM (`PRE_ADDROUNDKEY` / `ADDROUNDKEY` states) that is gated by `round_cntr` and `Nr` (the round count for the active key size — 10/12/14 for AES-128/192/256 per link:keyExp_logic.adoc[KeyExpansion & AddRoundKey]). The routing of random bits from the TRNG to the S-Box and the S-Box/AddRoundKey handshake timing follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation] and link:trng.adoc[TRNG Implementation].
-
-== InvCipher
-
-The `invCipher` module is the top-level datapath that coordinates `InvSubBytes` (via `invSbox`), `InvShiftRows`, `InvMixColumns`, and the inverse key-addition datapath (`invAddRoundKey`, see link:invCipher_keyExp.adoc[AES INVCIPHER Key Expansion Strategy]) into the complete AES decryption round structure. Like `cipher`, it contains no independent design derivation of its own — it is a direct structural implementation of the FIPS 197 `InvCipher()` procedure (Section 5.3):
-
-----
-procedure INVCIPHER(in, Nr, w)
-    state <- in
-    state <- ADDROUNDKEY(state, w[4*Nr..4*Nr+3])
-    for round from Nr-1 downto 1 do
-        state <- INVSHIFTROWS(state)
-        state <- INVSUBBYTES(state)
-        state <- ADDROUNDKEY(state, w[4*round..4*round+3])
-        state <- INVMIXCOLUMNS(state)
-    end for
-    state <- INVSHIFTROWS(state)
-    state <- INVSUBBYTES(state)
-    state <- ADDROUNDKEY(state, w[0..3])
-    return state
-end procedure
+make -C aes/sim run_test_suite block=aes_top
 ----
 
-Unlike `cipher`, which sits alongside `sbox` and `addRoundKey` as three separate sibling modules wired together at `cipher_top`, `invCipher` instantiates `invShiftRows`, `invSbox`, `invMixColumns`, and `invAddRoundKey` directly as its own sub-modules; only the externally shared `addRoundKey` block, which `invAddRoundKey` drives to build its key-schedule buffer, remains wired in from `invCipher_top`. Sequencing is controlled by an internal FSM (`PRE_INVADDROUNDKEY` / `INVADDROUNDKEY` states) gated by a round counter that, unlike `cipher`'s, counts down from `Nr` to `0` to match `InvCipher()`'s reverse traversal of the round-key schedule. Round `Nr`'s initial ADDROUNDKEY step runs through a separate, simpler code path with no InvShiftRows/InvSubBytes/InvMixColumns, since it is the schedule's starting point rather than its end.
+The suite runs against `aes_top`, the generated flat-port wrapper, because Verilator cannot elaborate an interface on a top-level port. `make -C aes/sim compile_rtl block=aes` performs an elaboration and lint check on the interface form.
 
-The reroute between `invShiftRows`'s output and `invSbox`'s input, and the write-back of `invSbox`'s output into the round state, both use the same explicit byte-index mapping in each direction, keeping the state matrix from being transposed as it passes through the masked S-Box. The routing of random bits from the TRNG to `invSbox`, and the invSbox/invCipher handshake timing, follow the conventions established in link:sbox.adoc[Composite Masked AES S-Box Implementation], link:invSbox.adoc[Composite Masked Inverse AES S-Box Implementation], and link:trng.adoc[TRNG Implementation].
+Scoring is against `aes_ref_model.py`, a mode-layer reference model that is self-checked at import against the SP 800-38A Appendix F vectors for ECB, CBC, CFB128, OFB and CTR at all three key sizes. The model works in the same `state_matrix_t` packing as the ports, since XOR commutes with the byte permutation but CTR's counter increment and CFB's segment slicing do not.
+
+Alongside the pass/fail suite, `aes_probes.py` holds cycle-level diagnostic probes that print internal traces rather than asserting a golden value. They are not collected by the regression and are the tool to reach for when a mode produces an unexpected result and the question is whether the formula, the routing, or the cipher's own output is at fault.
+
+A continuous protocol checker runs alongside every test, asserting the output channel's obligations each cycle: `outVALID` is never withdrawn without `outREADY`, `output_block` and `encCntxtOut` are stable across a VALID window, and no output carries X or Z once reset is released.
+
+The suite passes 54 of 54.
+
+== Known Limitations
+
+The following are known and deliberate, and are recorded here so that integrators are not surprised by them.
+
+*No status or error reporting.* The engine has no register layer and no status outputs. Invalid configuration, a permanently failed masking TRNG, and a failed IV-generator entropy source are all invisible at the interface. Candidate flags are drafted in `docs/status_register.md`; the TRNG dead-flag and IV-generator fault paths are the security-relevant ones and need an RTL signal route as well as a status bit.
+
+*Invalid `cfb_seg_bits` is not rejected.* An out-of-range segment size completes a handshake and returns a zeroed block rather than refusing the transaction. The behaviour is contained but inconsistent with an undecoded `mode[2:0]`, which goes inert. Resolving the inconsistency is deferred to the register layer, at which point both should follow the same rule.
+
+*`valid_bits` boundary cases.* The mask arithmetic is a seven-bit negation, so the usable range is 1 to 127. `valid_bits == 0` asserted together with `partial` produces an all-ones mask — no masking — rather than an all-zero block, and 128 is not representable in the field's width. A zero-length partial block is not a meaningful request, but it is currently accepted rather than rejected.
+
+*Disable is a freeze, and the manager must respect it.* As described in <<Enable and Clock Gating>>, a disabled engine cannot observe a handshake. There is no hardware interlock preventing a manager from driving `outREADY` at a disabled engine and believing the transfer completed.
+
+*Port byte order.* All 128-bit ports use `state_matrix_t` packing rather than FIPS 197 byte order. A manager speaking NIST byte order must apply the permutation given in <<Data Representation>>. This is an interface convention, not a defect, but it must be honoured consistently across data, IVs and counters.
+
+== References
+
+* FIPS PUB 197, _Advanced Encryption Standard (AES)_
+* NIST SP 800-38A, _Recommendation for Block Cipher Modes of Operation: Methods and Techniques_ — modes, test vectors in Appendix F, standard incrementing function in Appendix B.1
+* NIST SP 800-90A Rev. 1, _Recommendation for Random Number Generation Using Deterministic Random Bit Generators_ — CTR_DRBG
+* NIST SP 800-90B, _Recommendation for the Entropy Sources Used for Random Bit Generation_ — health tests
+* D. Canright, _A Very Compact S-Box for AES_, CHES 2005 — composite field inversion

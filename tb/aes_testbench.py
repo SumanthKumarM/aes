@@ -751,7 +751,7 @@ async def run_message(dut, cfg, blocks, *, enc_cntxt_in=0, partial_bits=None,
 # ---------------------------------------------------------------------------
 # Scoreboarding
 # ---------------------------------------------------------------------------
-def expected_outputs(cfg, blocks, context, partial_bits=None, ctr_increment="rtl"):
+def expected_outputs(cfg, blocks, context, partial_bits=None, ctr_increment="nist"):
     """Golden outputs for `blocks` under `cfg`, given the IV/counter actually used."""
     m = cfg.model()
     if cfg.mode == "ECB":
