@@ -13,7 +13,7 @@ import trng_param_pkg::*;
 import type_defs_pkg::*;
 
 module trng(
-    output logic [1679:0] rand_word,  // 1680-bit random packet to CIPHER block
+    output logic [1679:0] rand_word,  // 1680-bit random packet to Sbox block
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells SBox that TRNG has failed
     input logic sbox_ready,  // SBox acknowledges receiption of random bits
@@ -24,7 +24,7 @@ module trng(
     logic rand_bit_sync1, rand_bit;  // CDC synchronized rand_bit (clk domain)
 
     // entropy collector - keccak handshake
-    logic [63:0] entropy_word;
+    logic [191:0] entropy_word;
     logic valid, ready;
 
     logic key_ready;  // keccak to control unit
@@ -52,7 +52,7 @@ module trng(
     end
 
     // entropy collector (clk domain)    
-    entropy_clctr ENTROPY_COLLECTOR(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
+    entropy_clctr#(192) ENTROPY_COLLECTOR(entropy_word, valid, rand_bit, ready, clk, local_rst_n);
 
     // health tests (clk domain)
     health_tests HEALTH_TESTS(health_error, rand_bit, enb_health_tests_n, clk, ext_rst_n);
@@ -69,7 +69,7 @@ module keccak_cond (
     output logic [1679:0] rand_word,  // 1680 random bits needed for CIPHER
     output logic ready,  // indicates entropy collector that this block is ready to accecpt raw entropy
     output logic key_ready_req,  // indicates S-Box() that this block has valid key to send
-    input logic [63:0] raw_entropy,  // raw entropy from entropy collector 
+    input logic [191:0] raw_entropy,  // raw entropy from entropy collector 
     input logic get_raw_entropy,  // if high then accepts raw entropy or else uses DRBG feedback
     input logic sbox_ready,  // signal from Sbox that it received random bits
     input logic valid,  // from entropy collector indicating that it's ready to send the data
@@ -78,7 +78,6 @@ module keccak_cond (
     keccak_state_t state;  // state matrix for Keccak conditioning block
     logic [191:0] temp_entropy;  // to store raw entropy bits
     logic [4:0] round_cntr;  // keeps track of number of rounds
-    logic [1:0] rx_cntr;  // keeps track of handshakes
     Keccak_states fsm_state;  
     logic [1599:0] squeeze_buff;  // stores data temporarily until SQUEEZE enters 2nd cycle
     logic squeeze_done;  // used to extend SQUEEZE state by another cycle
@@ -162,7 +161,6 @@ module keccak_cond (
             squeeze_buff <= 0;
             squeeze_done <= 0;
             round_cntr <= 0;
-            rx_cntr <= 0;
             ready <= 0;
             key_ready_req <= 0;
         end
@@ -180,23 +178,9 @@ module keccak_cond (
                     // state[1599:1344] = 0 (capacity, initialized to zero)
                     if(get_raw_entropy) begin  // gets raw entropy bits from entropy collector
                         ready <= 1;
-                        if(valid) begin
-                            if(rx_cntr == 3) temp_entropy <= temp_entropy; 
-                            else temp_entropy[(8'(rx_cntr) << 6) +: 64] <= temp_entropy[(8'(rx_cntr) << 6) +: 64] ^ raw_entropy;
-                            rx_cntr <= rx_cntr + 1;
-                        end
-                        else begin
-                            temp_entropy <= temp_entropy;
-                            rx_cntr <= rx_cntr;
-                        end
-                        if(rx_cntr == 3) begin
-                            state <= state ^ {256'd0, 1'd1, 1150'd0, 1'd1, temp_entropy};
-                            fsm_state <= PERMUTE;
-                        end 
-                        else begin
-                            state <= state;
-                            fsm_state <= ABSORB;
-                        end
+
+                        state <= (valid) ? state ^ {256'd0, 1'd1, 1150'd0, 1'd1, raw_entropy} : state;  // absorbing raw entropy bits into state matrix
+                        fsm_state <= (valid) ? PERMUTE : ABSORB;
                     end
                     else begin  // DRBG (deterministic random bit generator) feedback path
                         state <= state ^ {256'd0, 1'd1, 1150'd0, 1'd1, state[0][2:0]};  // gets same bits from previous computation
@@ -208,13 +192,11 @@ module keccak_cond (
                     round_cntr <= (round_cntr == 23) ? 0 : round_cntr + 1;  // updating round_cntr
                     // since "absorb" completed, resetting these registers for next iteration
                     ready <= 0;
-                    rx_cntr <= 0;
                     key_ready_req <= 0;
                     fsm_state <= (round_cntr == 23) ? SQUEEZE : PERMUTE;
                 end
                 SQUEEZE: begin
                     ready <= 0;
-                    rx_cntr <= 0;
 
                     if(!squeeze_done) begin
                         squeeze_buff <= state_flat;

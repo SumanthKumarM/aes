@@ -33,7 +33,7 @@ Physical Noise (CMOS thermal/flicker jitter)
        └────┬────┘
             │
             ▼
-  Entropy Collector (256-bit SIPO)
+  Entropy Collector (192-bit SIPO)
             │
             ▼
   Keccak-f[1600] Conditioning (24 rounds)
@@ -136,10 +136,11 @@ shift register output:
 Configuration used in this design:
 
 ----
-entropy_pool_size = 256 bits
+entropy_pool_size = 192 bits
 ----
 
-These bits are injected into the Keccak conditioning block.
+These bits are injected into the Keccak conditioning block in a single absorb shot, rather than
+being merged across multiple sequential SIPO words.
 
 == Keccak Conditioning
 

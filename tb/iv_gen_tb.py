@@ -161,9 +161,9 @@ SEED_TIMEOUT = 4 * CYCLES_PER_SEED
 CB_CONSUME, CB_OPERATE, CB_RELEASE, CB_ERROR = 0, 1, 2, 3
 CB_NAMES = {0: "CONSUME", 1: "OPERATE", 2: "RELEASE", 3: "ERROR"}
 
-DR_INSTANTIATE, DR_GENERATE_IV, DR_RESEED, DR_UNINSTANTIATE, DR_RESET_CBCMAC = range(5)
+DR_INSTANTIATE, DR_GENERATE_IV, DR_RESEED, DR_UNINSTANTIATE = range(4)
 DR_NAMES = {0: "INSTANTIATE", 1: "GENERATE_IV", 2: "RESEED",
-            3: "UNINSTANTIATE", 4: "RESET_CBCMAC"}
+            3: "UNINSTANTIATE"}
 
 GEN_INCREMENT, GEN_ENCRYPT, GEN_CALL_UPDATE = 0, 1, 2
 GEN_NAMES = {0: "INCREMENT", 1: "ENCRYPT", 2: "CALL_UPDATE"}
@@ -1203,9 +1203,9 @@ async def health_error_test(dut):
                           RESEED_LIM * CYCLES_PER_GENERATE + 4 * CYCLES_PER_SEED)
     dut._log.info(f"✓ health_error asserted {n} cycles after the source died")
 
-    await wait_signal(dut, dut.CTR_DRBG.fsm_state, DR_RESET_CBCMAC,
+    await wait_signal(dut, dut.CTR_DRBG.fsm_state, DR_UNINSTANTIATE,
                       4 * CYCLES_PER_GENERATE)
-    dut._log.info("✓ CTR_DRBG reached RESET_CBCMAC")
+    dut._log.info("✓ CTR_DRBG reached UNINSTANTIATE")
 
     await wait_signal(dut, dut.rst_cbcmac, 0, 8)
     dut._log.info("✓ rst_cbcmac pulsed -- the conditioner's latched ERROR is cleared")

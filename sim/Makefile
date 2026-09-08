@@ -75,11 +75,16 @@ $(TRNG_PARAM_FILE): $(SIM_DIR)/gen_param.py
 	@echo "Generating RTL parameters..."
 	python3 $(SIM_DIR)/gen_param.py
 
-# Verification-only top wrappers (connect a block to a real TRNG instance for
-# cocotb simulation). Generated on demand by gen_top.py; never committed to
-# git, and never used by lint/synth/standalone RTL compilation -- those only
-# ever see the real design files referenced below.
-GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top
+# Verification-only top wrappers, generated on demand by gen_top.py; never
+# committed to git, and never used by lint/synth/standalone RTL compilation --
+# those only ever see the real design files referenced below.
+#
+# Two kinds, both existing only so cocotb has an elaborable DUT to drive:
+#   * entropy wrappers  -- bind a TRNG-consuming block to a real trng instance
+#   * aes_top           -- flattens aes.sv's aes_interface port into ordinary
+#                          ports, which Verilator requires of a simulation top
+#                          (see INTERFACE_TOP_BLOCKS below)
+GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top aes_top
 
 # RTL sources
 # composite_field_math_pkg is a foundational package (imports only type_defs_pkg)
@@ -90,13 +95,31 @@ GENERATED_TOP_BLOCKS := sbox_top addRoundKey_top cipher_top invSbox_top invCiphe
 BLOCK_DEPS =
 VERILOG_SOURCES = $(TYPEDEF_PKG) $(COMPOSITE_MATH_PKG) $(RTL_DIR)/icg.sv
 
+# aes.sv is the full-chip top: it instantiates TRNG, SBOX, ADDROUNDKEY, CIPHER,
+# INVCIPHER and IV_GEN directly, so its dependency set is the union of every
+# other block's. Two things this list must not lose:
+#   * invCipher.sv instantiates invAddRoundKey, and iv_gen.sv pulls in
+#     cbc_mac/ctr_drbg (each embedding its own unmasked_cipher, which in turn
+#     holds the addRoundKey_AES256 module and needs shiftRows/mixColumns).
+#   * Order matters. Verilator elaborates these as one compilation unit, and
+#     while -I$(RTL_DIR) lets it auto-find a *module* by filename, package
+#     imports do not resolve that way -- listing aes.sv alone made sbox.sv's
+#     composite_field_math functions ("Can't find definition of task/function:
+#     'masked_denominator'") unresolvable. Leaf modules are therefore listed
+#     ahead of the blocks that instantiate them, after the base packages above.
+AES_RTL_SOURCES = $(RTL_DIR)/shiftRows.sv $(RTL_DIR)/mixColumns.sv $(RTL_DIR)/invShiftRows.sv \
+                  $(RTL_DIR)/invMixColumns.sv $(RTL_DIR)/unmasked_cipher.sv $(RTL_DIR)/cbc_mac.sv \
+                  $(RTL_DIR)/ctr_drbg.sv $(RTL_DIR)/iv_gen.sv $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv \
+                  $(RTL_DIR)/invSbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invAddRoundKey.sv \
+                  $(RTL_DIR)/cipher.sv $(RTL_DIR)/invCipher.sv
+
 # drbg_utilities.sv holds the entropy collector and the SP 800-90B health tests,
 # shared by trng.sv and cbc_mac.sv (and pulled in transitively by every _top
 # wrapper that embeds a real TRNG). health_tests reads RCT_THRESHOLD /
 # APT_BIT_WINDOW / APT_THRESHOLD, so the blocks needing drbg_utilities.sv are
 # exactly the blocks needing trng_param_pkg.sv -- both are added together, with
 # the parameter package first so its imports resolve.
-ifneq ($(filter $(block),trng cbc_mac iv_gen sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
+ifneq ($(filter $(block),trng cbc_mac iv_gen aes aes_top sbox_top addRoundKey_top cipher_top invSbox_top invCipher_top invAddRoundKey_top),)
     BLOCK_DEPS += $(TRNG_PARAM_FILE)
     VERILOG_SOURCES += $(TRNG_PARAM_FILE) $(DRBG_UTILS)
 endif
@@ -133,6 +156,12 @@ else ifeq ($(block),invAddRoundKey_top)
 	VERILOG_SOURCES += $(RTL_DIR)/trng.sv $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/invAddRoundKey.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),invAddRoundKey)
 	VERILOG_SOURCES += $(RTL_DIR)/sbox.sv $(RTL_DIR)/addRoundKey.sv $(RTL_DIR)/$(block).sv
+else ifeq ($(block),aes)
+	VERILOG_SOURCES += $(AES_RTL_SOURCES) $(RTL_DIR)/$(block).sv
+else ifeq ($(block),aes_top)
+	# Simulation flavour of the block above: same sources plus the flat-port
+	# wrapper that makes aes.sv drivable by cocotb (see INTERFACE_TOP_BLOCKS).
+	VERILOG_SOURCES += $(AES_RTL_SOURCES) $(RTL_DIR)/aes.sv $(RTL_DIR)/$(block).sv
 else ifeq ($(block),icg)
 	# icg.sv is already in base VERILOG_SOURCES, so not needed here
 else
@@ -147,18 +176,36 @@ TOPLEVEL ?= $(block)
 # trailing "_top" when deriving the module name (sbox_top -> sbox_tb,
 # addRoundKey_top -> addRoundKey_tb, cipher_top -> cipher_tb).
 #
-# Blocks whose testbench is shared with another block override that default via
-# TB_MODULE_<block>. unmasked_cipher.sv implements the same FIPS 197 CIPHER
-# procedure as cipher.sv (LUT S-Box, no TRNG, AES-256 only), so cipher_tb.py
-# verifies both: it auto-detects the DUT flavor from COCOTB_TOPLEVEL and skips
-# the AES-128/192 known-answer tests when the DUT is AES-256 only.
+# Blocks whose testbench is shared with another block, or simply not named after
+# the block, override that default via TB_MODULE_<block>.
+#
+# unmasked_cipher.sv implements the same FIPS 197 CIPHER procedure as cipher.sv
+# (LUT S-Box, no TRNG, AES-256 only), so cipher_tb.py verifies both: it
+# auto-detects the DUT flavor from COCOTB_TOPLEVEL and skips the AES-128/192
+# known-answer tests when the DUT is AES-256 only.
+#
+# aes_top's suite is split across three modules rather than one monolith --
+# aes_sequence.py (the @cocotb.test bodies), aes_testbench.py (driver, monitor,
+# protocol checker, noise) and aes_ref_model.py (the SP 800-38A golden model).
+# Only the module holding the tests is named here; the other two are ordinary
+# imports found via PYTHONPATH.
 TB_MODULE_unmasked_cipher := cipher_tb
+TB_MODULE_aes_top := aes_sequence
 
 COCOTB_TEST_MODULES ?= $(or $(TB_MODULE_$(block)),$(patsubst %_top,%,$(block))_tb)
 
 # handle specific test selection
+#
+# The value is single-quoted because cocotb's Makefile.verilator interpolates it
+# straight into the shell command line as
+#   COCOTB_TEST_FILTER=$(COCOTB_TEST_FILTER) ... $(SIM_BUILD)/Vtop
+# with no quoting of its own. COCOTB_TEST_FILTER is a REGEX, so a perfectly
+# ordinary selection like `test='ecb_.*|cbc_.*'` otherwise has its `|` eaten by
+# the shell as a pipe and the run dies with "Error 127". The quotes are stripped
+# by the shell before the variable reaches the simulator, and that inline
+# assignment overrides the exported copy below, so the regex arrives intact.
 ifneq ($(test),)
-  COCOTB_TEST_FILTER = $(test)
+  COCOTB_TEST_FILTER = '$(test)'
   export COCOTB_TEST_FILTER
 endif
 
@@ -178,27 +225,71 @@ ifneq ($(filter $(block),$(GENERATED_TOP_BLOCKS)),)
 	python3 $(RTL_DIR)/gen_top.py $(block)
 endif
 
+# Blocks whose top-level port list is a SystemVerilog interface rather than flat
+# ports. aes.sv is one: `module aes(aes_interface.aes_intf aesBus)`. Verilator
+# cannot build a model for such a top --
+#   %Error-UNSUPPORTED: ../rtl/aes.sv:121: Interfaced port on top level module
+# -- and adding $(EXTRA_ARGS)' --trace on top of that trips an internal error in
+# V3TraceDecl ("Expected an interface scope name to have at least one dot"), so
+# the trace flags have to come off too. Elaboration itself is fine, so
+# compile_rtl runs these through a trace-free `--lint-only` instead: same full
+# hierarchy elaboration, same width/connectivity/lint diagnostics, just no
+# obj_dir/ C++ model at the end.
+#
+# To *simulate* such a block, use its flat-port wrapper instead: aes_top.sv
+# instantiates aes_interface internally and re-exposes every member as an
+# ordinary port, so `block=aes_top` builds and runs aes_sequence.py against the
+# real aes.sv. That wrapper is produced by gen_top.py like every other
+# *_top.sv here, so it is in GENERATED_TOP_BLOCKS above and the `gen_top`
+# prerequisite regenerates it before each build.
+INTERFACE_TOP_BLOCKS := aes
+ifneq ($(filter $(block),$(INTERFACE_TOP_BLOCKS)),)
+    VERILATOR_ELAB_ARGS = --lint-only $(COMPILE_ARGS)
+    VERILATOR_ELAB_NOTE = (elaboration only -- interface top, no C++ model)
+    VERILATOR_ELAB_DONE = Elaboration check passed; no obj_dir/ model is produced for an interface top.
+else
+    VERILATOR_ELAB_ARGS = --cc $(COMPILE_ARGS) $(EXTRA_ARGS)
+    VERILATOR_ELAB_NOTE =
+    VERILATOR_ELAB_DONE = Compiled artifacts in obj_dir/
+endif
+
+# Refuses a cocotb run for a block Verilator cannot build a model for, instead of
+# letting it fail several hundred lines into an internal-error dump.
+.PHONY: check_sim_top
+check_sim_top:
+	@if [ -n "$(filter $(block),$(INTERFACE_TOP_BLOCKS))" ]; then \
+		echo "Error: block '$(block)' exposes a SystemVerilog interface on its top-level ports,"; \
+		echo "       which Verilator cannot elaborate as a simulation top."; \
+		echo "       Run the simulation against its flat-port wrapper instead:"; \
+		echo "           make run_test_suite block=$(block)_top"; \
+		echo "       or use 'make compile_rtl block=$(block)' for an elaboration check."; \
+		exit 1; \
+	fi
+
 # Standalone RTL elaboration check (Verilator only, no cocotb linkage). This is
 # independent of run_test/run_test_suite: cocotb's own `sim` target (pulled in below)
 # already compiles incrementally via Make's normal file-mtime tracking, so
 # nothing here needs to duplicate that compile.
 # gen_top is a prerequisite so that _top wrapper blocks are (re)generated
 # before elaboration; it is a no-op for base block names.
+#
+# `set -o pipefail` is load-bearing: piping verilator into tee otherwise hands
+# make tee's exit status, so a failed compile still reported success.
 .PHONY: compile_rtl
 compile_rtl: gen_top $(BLOCK_DEPS)
-	@echo "Compiling RTL for $(block) with Verilator..."
-	verilator --cc $(COMPILE_ARGS) $(EXTRA_ARGS) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
-	@echo "RTL compilation complete. Compiled artifacts in obj_dir/"
+	@echo "Compiling RTL for $(block) with Verilator...$(if $(VERILATOR_ELAB_NOTE), $(VERILATOR_ELAB_NOTE))"
+	@set -o pipefail; verilator $(VERILATOR_ELAB_ARGS) $(VERILOG_SOURCES) --top $(block) 2>&1 | tee compile.log
+	@echo "RTL compilation complete. $(VERILATOR_ELAB_DONE)"
 
 .PHONY: run_test_suite
-run_test_suite: gen_top $(BLOCK_DEPS)
+run_test_suite: check_sim_top gen_top $(BLOCK_DEPS)
 	@echo "Running all tests..."
-	$(MAKE) sim 2>&1 | tee sim.log
+	@set -o pipefail; $(MAKE) sim 2>&1 | tee sim.log
 
 .PHONY: run_test
-run_test: gen_top $(BLOCK_DEPS)
+run_test: check_sim_top gen_top $(BLOCK_DEPS)
 	@echo "Running specific test: $(test)"
-	$(MAKE) sim 2>&1 | tee sim.log
+	@set -o pipefail; $(MAKE) sim 2>&1 | tee sim.log
 
 # cocotb inclusion -
 # This file provides the 'sim' target

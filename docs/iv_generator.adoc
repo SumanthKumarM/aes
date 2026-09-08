@@ -505,6 +505,35 @@ Uninstantiate():
 
 No AES operation is performed. The DRBG is unusable until `Instantiate()` executes again.
 
+==== Hardware Trigger and Recovery Behavior
+
+Unlike Instantiate, Generate, and Reseed — which the pseudocode above treats as calls a
+consuming application makes — Uninstantiate has no consuming-application trigger in this
+implementation. SP 800-90A §9.4 does not mandate an automatic trigger for Uninstantiate (unlike
+Reseed, which the reseed counter drives automatically), and AES itself, as the consumer of
+`generated_iv`, has no visibility into entropy health and no basis to request it. In
+`ctr_drbg.sv`, the `UNINSTANTIATE` state is instead entered automatically whenever `health_error`
+is asserted from any operating state (`INSTANTIATE`, `GENERATE_IV`, `RESEED`) — a persistent
+noise-source or CBC-MAC health-test failure — matching the catastrophic-failure handling SP
+800-90A §11.4.2 requires ("the DRBG shall enter an error state and output an error indicator").
+
+This state previously existed as a separate `RESET_CBCMAC` state, entered the same way on
+`health_error`. The two were functionally near-identical — both zeroize `Key`/`V`/
+`reseed_counter` and hold the CBC-MAC conditioner in reset — so `RESET_CBCMAC` was folded into
+`UNINSTANTIATE` rather than kept as a duplicate path. `rst_cbcmac` is now held low for the entire
+time `UNINSTANTIATE` is resident, rather than pulsed for a single cycle as `RESET_CBCMAC` did, so
+the conditioner stays quiesced for as long as the DRBG is uninstantiated instead of immediately
+resuming entropy collection.
+
+NOTE: **Documented deviation.** SP 800-90A §11.4.2 states that exiting a health-test error state
+requires "user intervention (e.g., power cycling of the DRBG)" before the DRBG can be
+re-instantiated. This implementation does not currently enforce that: `UNINSTANTIATE` zeroizes
+state for exactly one cycle and then unconditionally transitions back to `INSTANTIATE`, where it
+waits for a fresh conditioned seed from CBC-MAC and re-instantiates automatically once one
+arrives — no external `rst_n` toggle is required. The stricter reading (latching in
+`UNINSTANTIATE` until `rst_n`, mirroring `trng.sv`'s `DEAD` state) has been identified but not yet
+implemented; this is an open design item, not an oversight in this document.
+
 === AES Operation Summary
 
 [cols="1,1,2"]
