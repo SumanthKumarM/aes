@@ -88,8 +88,14 @@ module cipher(
         else begin  // (for round from 1 to Nr − 1 do ... end for) & last round
             if(!enb_n) begin  // CIPHER operates when enabled
                 if(round_cntr == 0) begin  // only AddRoundKey is performed in first cipher round
+                    // once cipher_done is asserted round_cntr wraps to 0 in next cycle and CIPHER enters this 
+                    // branch where ark_enb_n is required to stay disabled until new input is loaded. Since
+                    // cipher_done stays high for another cycle after it got asserted that will make sure
+                    // ark_enb_n stays high for one extra cycle which is when new input is loaded and helps
+                    // avoid AddRoundKey operating on stale input instead of new input
+                    ark_enb_n <= cipher_done;
+
                     sbox_enb_n <= 2'b11;  // Sbox is not required yet
-                    ark_enb_n <= 0;  // addRoundKey is enabled
                     ark_state <= state;  // loading input of addRoundKey
                     temp_state <= (ark_done) ? addRoundKeyOut : temp_state;
                     round_cntr <= (ark_done) ? 1 : 0;

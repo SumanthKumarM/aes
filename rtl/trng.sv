@@ -13,7 +13,7 @@ import trng_param_pkg::*;
 import type_defs_pkg::*;
 
 module trng(
-    output logic [1679:0] rand_word,  // 1680-bit random packet to CIPHER block
+    output logic [1679:0] rand_word,  // 1680-bit random packet to Sbox block
     output logic trng_key_valid,  // tells S-box that random words are ready
     output logic dead_flag,  // tells SBox that TRNG has failed
     input logic sbox_ready,  // SBox acknowledges receiption of random bits
@@ -78,7 +78,6 @@ module keccak_cond (
     keccak_state_t state;  // state matrix for Keccak conditioning block
     logic [191:0] temp_entropy;  // to store raw entropy bits
     logic [4:0] round_cntr;  // keeps track of number of rounds
-    logic [1:0] rx_cntr;  // keeps track of handshakes
     Keccak_states fsm_state;  
     logic [1599:0] squeeze_buff;  // stores data temporarily until SQUEEZE enters 2nd cycle
     logic squeeze_done;  // used to extend SQUEEZE state by another cycle
@@ -162,7 +161,6 @@ module keccak_cond (
             squeeze_buff <= 0;
             squeeze_done <= 0;
             round_cntr <= 0;
-            rx_cntr <= 0;
             ready <= 0;
             key_ready_req <= 0;
         end
@@ -194,13 +192,11 @@ module keccak_cond (
                     round_cntr <= (round_cntr == 23) ? 0 : round_cntr + 1;  // updating round_cntr
                     // since "absorb" completed, resetting these registers for next iteration
                     ready <= 0;
-                    rx_cntr <= 0;
                     key_ready_req <= 0;
                     fsm_state <= (round_cntr == 23) ? SQUEEZE : PERMUTE;
                 end
                 SQUEEZE: begin
                     ready <= 0;
-                    rx_cntr <= 0;
 
                     if(!squeeze_done) begin
                         squeeze_buff <= state_flat;

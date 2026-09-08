@@ -81,4 +81,9 @@ package type_defs_pkg;
         ENCRYPT,
         CALL_UPDATE
     } gen_internal_states;
+
+    typedef enum logic {
+        ARM,
+        SHOOT
+    } aes_modes_internal_states;
 endpackage
