@@ -166,11 +166,16 @@ module aes(
 
     // internal registers used in AES mode operations
     logic first_q;  // latches 'first' signal in CBC mode
+    logic partial_q;  // latches 'partial' signal in OFB and CTR mode
+    logic [6:0] valid_bits_q;  // latches 'valid_bits' signal in OFB and CTR mode
     unibble seg_cntr;  // keeps track of number of segments processed in CFB mode
     unibble seg_cntr_lim;  // seg_cntr max limit based on segment size in CFB mode
     u128_t temp, _temp;  // temporary registers to hold intermediate state in different AES modes
     aes_modes_internal_states fsm_state;
     u128_t ctr_mode_cntr;  // 128-bit counter used in CTR mode
+    u128_t ctr_sm;  // stores ctr_mode_cntr in state_matrix_t format
+    u128_t dctr_sm;  // stores _temp in state_matrix_t format
+    u128_t ectx_ctr;   // encCntxtIn is converted back to plain counter order
 
     assign trng_rst_n = aesBus.rst_n & sbox_rst_trng & invSbox_rst_trng;  // TRNG is reset when either Sbox or invSbox has encountered fatal error or through global reset
     assign trng_ready_in = sbox_ready | invSbox_ready;  // TRNG gives random entropy when either of Sbox or invSbox is ready to accept them
@@ -280,7 +285,8 @@ module aes(
         aesBus.rst_n, 
         gated_clk);
 
-    always_comb begin  // no. of segments per 128-bit block based on segment size
+    always_comb begin
+        // no. of segments per 128-bit block based on segment size
         case(aesBus.cfb_seg_bits)
             3'b001: seg_cntr_lim = 4'hF;  // CFB8
             3'b010: seg_cntr_lim = 4'h7;  // CFB16
@@ -289,6 +295,13 @@ module aes(
             // since in CFB128 a segment is a whole AES block itself it doesn't need a counter to keep track of segments
             default: seg_cntr_lim = 4'h0;
         endcase
+
+        // data format conversions which are required only in CTR mode
+        for(int i=0; i<16; i++) begin
+            ctr_sm[(8*i) +: 8] = (aesBus.mode[2:0] == 3'b101) ? ctr_mode_cntr[(8*((12+(i/4))-(4*(i%4)))) +: 8] : 8'h00;
+            dctr_sm[(8*i) +: 8] = (aesBus.mode == 4'b1101) ? _temp[(8*((12+(i/4))-(4*(i%4)))) +: 8] : 8'h00;
+            ectx_ctr[(8*((12+(i/4))-(4*(i%4)))) +: 8] = (aesBus.mode == 4'b1101) ? aesBus.encCntxtIn[(8*i) +: 8] : 0;
+        end
     end
 
     // this is the sequential block that implements AES modes
@@ -301,6 +314,8 @@ module aes(
             aesBus.output_block <= 0;
             aes_iv_ready <= 0;
             first_q <= 0;
+            partial_q <= 0;
+            valid_bits_q <= 0;
             aesBus.encCntxtOut <= 0;
             aesBus.inREADY <= 0;
             aesBus.outVALID <= 0;
@@ -382,6 +397,8 @@ module aes(
                         seg_cntr <= 0;  // this counter has no relevance in this mode
                         aesBus.encCntxtOut <= 0;
                         first_q <= 0;
+                        partial_q <= 0;
+                        valid_bits_q <= 0;
                     end
 
                     /**
@@ -499,7 +516,7 @@ module aes(
                                 // seg_cntr wraps to 0 after every input block is processed. So AES is required to raise READY at this time.
                                 // When AES receives first block of current message it has to wait for IV_gen to generate valid IV and only then can it
                                 // accept input block. For subsequent blocks it can accept input block without waiting for IV_gen to generate valid IV.
-                                aesBus.inREADY <= (seg_cntr == 0) ? ((aesBus.first) ? iv_valid : 1) : 0;
+                                aesBus.inREADY <= (aesBus.first || seg_cntr == 0) ? ((aesBus.first) ? iv_valid : 1) : 0;
 
                                 aes_iv_ready <= (aesBus.first) ? aesBus.inVALID : 0;  // AES doesn't accept IV until it has valid 1st segment in 1stt block and for subsequent blocks it doesn't require IV
                                 temp <= (aesBus.inREADY && aesBus.inVALID) ? aesBus.input_block : temp;  // capturing incoming 128-bit block
@@ -537,7 +554,7 @@ module aes(
                                     end
                                 end
 
-                                if(seg_cntr == 0) fsm_state <= (aesBus.inVALID && aesBus.inREADY) ? SHOOT : ARM;
+                                if(aesBus.first || seg_cntr == 0) fsm_state <= (aesBus.inVALID && aesBus.inREADY) ? SHOOT : ARM;
                                 else fsm_state <= SHOOT;  // takes only 1 cycle to update CIPHER input while operating within 128-bit block
                             end
                             SHOOT: begin
@@ -586,6 +603,8 @@ module aes(
                         invCipher_enb_n <= 1;
                         invCipherIn <= 0;
                         first_q <= 0;
+                        partial_q <= 0;
+                        valid_bits_q <= 0;
                     end
 
                     /**
@@ -610,6 +629,8 @@ module aes(
                                 aesBus.inREADY <= (aesBus.first) ? iv_valid : 1;  // AES doesn't accept input block until it has valid IV for first block and for subsequent blocks it accepts input block
                                 aes_iv_ready <= (aesBus.first) ? aesBus.inVALID : 0;  // AES doesn't accept IV until it has valid input block for first block and for subsequent blocks it doesn't require IV
                                 temp <= (aesBus.inVALID) ? aesBus.input_block : temp;  // capturing input block so that it can be used in SHOOT state
+                                partial_q <= (aesBus.partial) ? 1 : partial_q;
+                                valid_bits_q <= (aesBus.partial) ? aesBus.valid_bits : valid_bits_q;
                                 aesBus.encCntxtOut <= (!aesBus.mode[3]) ? ((aesBus.first && aesBus.inVALID && iv_valid) ? generated_IV : aesBus.encCntxtOut) : 0;
 
                                 // setting up CIPHER inputs
@@ -632,9 +653,11 @@ module aes(
                                 aesBus.inREADY <= 0;
                                 aes_iv_ready <= 0;
                                 cipher_enb_n <= cipher_done | aesBus.outVALID;  // CIPHER gets disabled when it's done computing the transformed state
+                                partial_q <= (cipher_done && partial_q) ? 0 : partial_q;
+                                valid_bits_q <= (cipher_done && partial_q) ? 0 : valid_bits_q;
 
-                                if(!aesBus.partial) aesBus.output_block <= (cipher_done) ? (temp ^ cipherOut) : aesBus.output_block;
-                                else aesBus.output_block <= (cipher_done) ? ((temp ^ cipherOut) & ({128{1'b1}} << (~aesBus.valid_bits + 7'd1))) : aesBus.output_block;
+                                if(!partial_q) aesBus.output_block <= (cipher_done) ? (temp ^ cipherOut) : aesBus.output_block;
+                                else aesBus.output_block <= (cipher_done) ? ((temp ^ cipherOut) & ({128{1'b1}} << (~valid_bits_q + 7'd1))) : aesBus.output_block;
 
                                 // asserting outVALID signal accordingly
                                 if(!aesBus.outVALID && cipher_done) aesBus.outVALID <= 1;
@@ -669,11 +692,13 @@ module aes(
                             ARM: begin
                                 aesBus.inREADY <= 1;  // AES is READY to accept input block
                                 temp <= (aesBus.inVALID) ? aesBus.input_block : temp;
-                                _temp <= (aesBus.mode[3] && aesBus.first) ? aesBus.encCntxtIn : _temp;
+                                _temp <= (aesBus.mode[3] && aesBus.first) ? ectx_ctr : _temp;
+                                partial_q <= (aesBus.partial) ? 1 : partial_q;
+                                valid_bits_q <= (aesBus.partial) ? aesBus.valid_bits : valid_bits_q;
                                 cipher_enb_n <= (aesBus.inVALID) ? 0 : 1;  // CIPHER is enabled when input block is valid
-                                cipherIn <= (!aesBus.mode[3]) ? ctr_mode_cntr : ((aesBus.first) ? aesBus.encCntxtIn : _temp);
+                                cipherIn <= (!aesBus.mode[3]) ? ctr_sm : ((aesBus.first) ? aesBus.encCntxtIn : dctr_sm);
                                 aesBus.outVALID <= 0;  // AES is not READY to give output block yet
-                                aesBus.encCntxtOut <= (!aesBus.mode[3]) ? ((aesBus.first && aesBus.inVALID) ? ctr_mode_cntr : aesBus.encCntxtOut) : 0;
+                                aesBus.encCntxtOut <= (!aesBus.mode[3]) ? ((aesBus.first && aesBus.inVALID) ? ctr_sm : aesBus.encCntxtOut) : 0;
                                 fsm_state <= (aesBus.inVALID) ? SHOOT : ARM;
                             end 
                             SHOOT: begin
@@ -681,9 +706,11 @@ module aes(
                                 cipher_enb_n <= cipher_done | aesBus.outVALID;  // CIPHER gets disabled when it's done computing the transformed state
                                 ctr_mode_cntr <= (!aesBus.mode[3] && cipher_done) ? ctr_mode_cntr + 1 : ctr_mode_cntr;
                                 _temp <= (aesBus.mode[3] && cipher_done) ? _temp + 1 : _temp;
+                                partial_q <= (cipher_done && partial_q) ? 0 : partial_q;
+                                valid_bits_q <= (cipher_done && partial_q) ? 0 : valid_bits_q;
                                 
-                                if(!aesBus.partial) aesBus.output_block <= (cipher_done) ? (temp ^ cipherOut) : aesBus.output_block;
-                                else aesBus.output_block <= (cipher_done) ? ((temp ^ cipherOut) & ({128{1'b1}} << (~aesBus.valid_bits + 7'd1))) : aesBus.output_block;
+                                if(!partial_q) aesBus.output_block <= (cipher_done) ? (temp ^ cipherOut) : aesBus.output_block;
+                                else aesBus.output_block <= (cipher_done) ? ((temp ^ cipherOut) & ({128{1'b1}} << (~valid_bits_q + 7'd1))) : aesBus.output_block;
 
                                 // asserting outVALID signal accordingly
                                 if(!aesBus.outVALID && cipher_done) aesBus.outVALID <= 1;
@@ -710,6 +737,8 @@ module aes(
                         aesBus.output_block <= 0;
                         aesBus.encCntxtOut <= 0;
                         first_q <= 0;
+                        partial_q <= 0;
+                        valid_bits_q <= 0;
                         aes_iv_ready <= 0;
                         aesBus.inREADY <= 0;
                         aesBus.outVALID <= 0;
@@ -731,6 +760,9 @@ module aes(
                 aesBus.inREADY <= 0;
                 aesBus.outVALID <= 0;
                 seg_cntr <= seg_cntr;
+                first_q <= 0;
+                partial_q <= 0;
+                valid_bits_q <= 0;
                 temp <= temp;
                 _temp <= _temp;
                 ctr_mode_cntr <= ctr_mode_cntr;

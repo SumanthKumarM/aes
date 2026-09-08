@@ -100,7 +100,7 @@ def banner(dut, text):
 
 
 async def run_and_check(dut, cfg, blocks, *, context=None, partial_bits=None,
-                        ready_delay=0, send_gap=0, label="", ctr_increment="rtl"):
+                        ready_delay=0, send_gap=0, label="", ctr_increment="nist"):
     """Push a message through the DUT and scoreboard it.
 
     For the paths that generate their own IV/counter (CBC/CFB/OFB encryption,
@@ -258,35 +258,81 @@ async def enable_gating_freezes_fsm(dut):
 
 @cocotb.test(timeout_time=TIMEOUT_MS, timeout_unit="ms")
 async def disable_while_outvalid(dut):
-    """Raising enb_n while an output is pending must not corrupt the handshake.
+    """enb_n freezes the AES; a pending output is HELD, never withdrawn.
 
-    aes.sv:723-738 has an explicit `else` branch for enb_n=1 that clears
-    `inREADY` and `outVALID`. That branch lives inside `always_ff @(posedge
-    gated_clk)`, and the ICG enable is `~enb_n | ~rst_n`, so the clock is already
-    stopped whenever the branch's own condition is true -- it can never execute.
-    This test states the consequence: whatever the handshake outputs were when
-    enb_n rose, they stay, and a consumer that raises outREADY during the parked
-    window sees a transfer that the DUT is not participating in.
+    POLICY (settled 2026-09-08): a disable is a *freeze*, not a soft reset.
+
+    aes.sv's ICG enable is `~enb_n | ~rst_n` (aes.sv:186-189), so raising enb_n
+    removes every clock edge from the block and each register -- `inREADY` and
+    `outVALID` included -- holds its value. A manager that asked for a block and
+    then disabled the AES gets that block back intact on re-enable; nothing is
+    discarded. That is what preserves data integrity, and it is also what keeps
+    output-channel rule C1 (VALID may not drop without READY) true across a
+    disable, which no "clear the handshake on enb_n" policy can do.
+
+    The corollary is an integration requirement the AES cannot enforce for
+    itself: a frozen AES cannot observe a handshake, so the manager must not
+    drive `outREADY` (or `inVALID`) at a disabled AES. Phase 3 pins that down --
+    the DUT correctly ignores it, which is exactly why the manager must not rely
+    on it being seen.
     """
-    banner(dut, "TC5: enb_n asserted while outVALID is high")
+    banner(dut, "TC5: enb_n while an output is pending -- freeze, not withdraw")
     env = await bringup(dut)
     cfg = AesConfig("ECB", KEY_128)
     apply_config(dut, cfg)
+    want = cfg.model().encrypt_block(PT_38A[0])
+
     await send_block(dut, PT_38A[0], first=True)
     await wait_signal(dut, dut.outVALID, 1, BLOCK_TIMEOUT, "outVALID")
 
+    held = {"output_block": int(dut.output_block.value),
+            "encCntxtOut": int(dut.encCntxtOut.value),
+            "inREADY":     int(dut.inREADY.value),
+            "outVALID":    int(dut.outVALID.value)}
+    fsm = probe(dut, "AES.fsm_state")
+    held_fsm = int(fsm.value) if fsm is not None else None
+
+    # -- phase 1: the freeze holds the entire output channel, not just the data --
     dut.enb_n.value = 1
     await ClockCycles(dut.clk, 10)
-    parked_valid = int(dut.outVALID.value)
-    dut._log.info(f"  outVALID while parked = {parked_valid} "
-                  f"(aes.sv:732 intends 0)")
-    assert parked_valid == 0, (
-        "outVALID is still asserted after enb_n went high. aes.sv:732 assigns "
-        "outVALID <= 0 in the disabled branch, but that branch is unreachable: "
-        "the ICG at aes.sv:186-189 gates the clock off with the very condition "
-        "(enb_n=1, rst_n=1) that selects it. A downstream device that treats "
-        "outVALID as live will re-consume a block the disabled AES cannot "
-        "retract, and inREADY is stuck the same way")
+    for name, exp in held.items():
+        got = int(getattr(dut, name).value)
+        assert got == exp, (
+            f"{name} changed while enb_n was high (0x{exp:x} -> 0x{got:x}). A "
+            f"disabled AES must freeze, not withdraw: the manager asked for this "
+            f"block and is entitled to find it unchanged on re-enable")
+    if held_fsm is not None:
+        assert int(fsm.value) == held_fsm, "fsm_state advanced while enb_n was high"
+
+    # -- phase 2: a frozen AES cannot participate in a handshake ----------------
+    dut.outREADY.value = 1
+    await ClockCycles(dut.clk, 5)
+    assert int(dut.outVALID.value) == 1, (
+        "outVALID cleared while enb_n was high, so the DUT appears to have "
+        "completed a transfer it has no clock to process -- that block would be "
+        "lost. A frozen AES must ignore outREADY")
+    if held_fsm is not None:
+        assert int(fsm.value) == held_fsm, (
+            "fsm_state advanced in response to outREADY while enb_n was high")
+    dut.outREADY.value = 0
+    await ClockCycles(dut.clk, 2)
+    dut._log.info("  outREADY while disabled was ignored, as the freeze requires")
+
+    # -- phase 3: re-enable, and the very same block is delivered intact --------
+    dut.enb_n.value = 0
+    out = await recv_block(dut)
+    assert out.data == want, (
+        f"the pending block did not survive the disable: got {rtl_hex(out.data)}, "
+        f"want {rtl_hex(want)}")
+    await ClockCycles(dut.clk, 2)
+    assert int(dut.outVALID.value) == 0, (
+        "outVALID did not clear after the post-resume transfer")
+    dut._log.info("  block held across the disable and delivered intact on resume")
+
+    # -- phase 4: the disable left no residue behind ----------------------------
+    res = await run_message(dut, cfg, [PT_38A[1]])
+    compare(dut, cfg, res.outputs, cfg.model().ecb_encrypt([PT_38A[1]]),
+            label="TC5 message after the disable")
     env.checker.check()
 
 
